@@ -1,0 +1,25 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --bg-main: #0a0a0f; --bg-card: #111118; --bg-sidebar: #0d0d14;
+  --bg-input: #1a1a24; --text-main: #f1f5f9; --text-muted: #94a3b8;
+  --border: #1e1e2e; --accent: #f97316;
+}
+html.light {
+  --bg-main: #f8fafc; --bg-card: #ffffff; --bg-sidebar: #f1f5f9;
+  --bg-input: #f1f5f9; --text-main: #0f172a; --text-muted: #475569;
+  --border: #e2e8f0; --accent: #f97316;
+}
+
+.pb-safe {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+@layer utilities {
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
+  .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+  .scrollbar-custom::-webkit-scrollbar { width: 4px; }
+  .scrollbar-custom::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-custom::-webkit-scrollbar-thumb { background-color: #f97316; border-radius: 20px; }
+}
