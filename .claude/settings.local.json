@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(cargo watch:*)",
+      "Bash(cargo check:*)",
+      "Bash(trunk build:*)",
+      "Bash(cargo add:*)",
+      "Bash(test:*)",
+      "Bash(awk:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(dx build:*)",
+      "Bash(\"C:/Users/ASUS/Desktop/rust-chat-forum/frontend/assets/tailwind.css\":*)",
+      "Bash(python:*)",
+      "Bash(tree -L 3 \"C:\\\\Users\\\\ASUS\\\\Desktop\\\\rust-chat-forum\" -I 'target|node_modules|\\\\.git' 2>/dev/null || find \"C:\\\\Users\\\\ASUS\\\\Desktop\\\\rust-chat-forum\" -type d -not -path '*/target/*' -not -path '*/.git/*' -not -path '*/node_modules/*' | head -50)"
+    ]
+  }
+}

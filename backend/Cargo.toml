@@ -1,7 +1,7 @@
 [package]
 name = "backend"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 default-run = "backend"
 
 [dependencies]
@@ -25,6 +25,10 @@ dashmap = "6.1.0"
 tracing = "0.1.44"
 feed-rs = "1.3"
 regex = "1"
+once_cell = "1"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-native-tls", "builder"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 
 [[bin]]
 name = "backend"

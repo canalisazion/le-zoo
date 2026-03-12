@@ -92,6 +92,10 @@ pub fn Chat() -> Element {
     let mut user_is_premium = use_signal(|| false);
     let mut show_archive_modal = use_signal(|| false);
     let mut archive_text = use_signal(|| String::new());
+    let mut oldest_msg_id = use_signal(|| Option::<String>::None);
+    let mut has_more_msgs = use_signal(|| false);
+    let mut oldest_dm_id = use_signal(|| Option::<String>::None);
+    let mut has_more_dms = use_signal(|| false);
 
     // --- RESOURCES ---
 
@@ -182,6 +186,12 @@ pub fn Chat() -> Element {
             let client = Client::new();
             let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
 
+            // Reset pagination state on channel/DM switch
+            oldest_msg_id.set(None);
+            has_more_msgs.set(false);
+            oldest_dm_id.set(None);
+            has_more_dms.set(false);
+
             if let Some(target) = direct_with {
                 // Charger messages privés
                 let url = format!("{}/api/direct_messages?with={}", API_BASE_URL, target);
@@ -207,6 +217,8 @@ pub fn Chat() -> Element {
                                 pinned: m.pinned,
                             })
                             .collect();
+                        has_more_dms.set(msgs.len() == 50);
+                        oldest_dm_id.set(formatted.first().and_then(|m| m.id.clone()));
                         messages.set(formatted.clone());
 
                         let current_user = LocalStorage::get::<String>("username").unwrap_or_default();
@@ -245,6 +257,8 @@ pub fn Chat() -> Element {
                                 pinned: m.pinned,
                             })
                             .collect();
+                        has_more_msgs.set(msgs.len() == 100);
+                        oldest_msg_id.set(formatted.first().and_then(|m| m.id.clone()));
                         messages.set(formatted);
                     }
                 }
@@ -252,16 +266,33 @@ pub fn Chat() -> Element {
         }
     });
 
-    // Connexion WebSocket (se recrée à chaque changement de salon)
+    // Connexion WebSocket — le JWT ne passe plus dans l'URL (sécurité)
+    // Il est envoyé dans le premier message {"type":"auth","token":"...","channel":"..."}
     let _ws_future = use_resource(move || {
         let channel = current_channel.read().clone();
         let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
-        let ws_url = format!("{}/ws?token={}&channel={}", WS_BASE_URL, token, channel);
-        let _ = direct_chat_with.read(); // lu pour la réactivité — valeur relue fraîche dans la boucle
+        let ws_url = format!("{}/ws", WS_BASE_URL);
+        let _ = direct_chat_with.read(); // lu pour la réactivité
 
         async move {
-            if let Ok(ws) = WebSocket::open(&ws_url) {
-                let (mut write, mut read) = ws.split();
+            let ws = match WebSocket::open(&ws_url) {
+                Ok(ws) => ws,
+                Err(_) => return,
+            };
+            let (mut write, mut read) = ws.split();
+
+            // Envoyer le message d'authentification immédiatement
+            let auth_msg = serde_json::json!({
+                "type": "auth",
+                "token": token,
+                "channel": channel,
+            })
+            .to_string();
+            if write.send(Message::Text(auth_msg)).await.is_err() {
+                return;
+            }
+
+            {
 
                 loop {
                     match select(
@@ -559,7 +590,7 @@ pub fn Chat() -> Element {
                                                                 }
                                                                 p { class: "text-xs text-gray-500 dark:text-gray-400 mt-2",
                                                                     "🔗 ",
-                                                                    a { href: "{media_url}", target: "_blank", class: "underline hover:text-blue-400",
+                                                                    a { href: "{media_url}", target: "_blank", rel: "noopener noreferrer", class: "underline hover:text-blue-400",
                                                                         "Ouvrir dans un nouvel onglet"
                                                                     }
                                                                 }
@@ -578,6 +609,110 @@ pub fn Chat() -> Element {
                             }
                         } else {
                             rsx! {}
+                        }
+                    }
+
+                    // Bouton "Charger plus" pour les messages privés (DM)
+                    if *has_more_dms.read() && direct_chat_with.read().is_some() {
+                        div { class: "flex justify-center py-2 flex-shrink-0",
+                            button {
+                                class: "px-4 py-1.5 rounded-full text-xs font-semibold bg-gray-700 hover:bg-gray-600 text-gray-300 transition",
+                                onclick: move |_| {
+                                    let target = direct_chat_with.read().clone();
+                                    let before = oldest_dm_id.read().clone();
+                                    if let (Some(dm_target), Some(before_id)) = (target, before) {
+                                        spawn(async move {
+                                            let client = Client::new();
+                                            let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
+                                            let url = format!("{}/api/direct_messages?with={}&before_id={}", API_BASE_URL, dm_target, before_id);
+                                            if let Ok(res) = client
+                                                .get(url)
+                                                .header("Authorization", format!("Bearer {}", token))
+                                                .send()
+                                                .await
+                                            {
+                                                if let Ok(msgs) = res.json::<Vec<shared::Message>>().await {
+                                                    let older: Vec<ChatMessage> = msgs
+                                                        .iter()
+                                                        .map(|m| ChatMessage {
+                                                            author: m.author_name.clone(),
+                                                            content: m.content.clone(),
+                                                            role: m.author_role.clone(),
+                                                            gender: m.author_gender.clone(),
+                                                            is_direct: true,
+                                                            pending: false,
+                                                            created_at: m.created_at,
+                                                            status: m.status.clone(),
+                                                            id: m.id.clone(),
+                                                            pinned: m.pinned,
+                                                        })
+                                                        .collect();
+                                                    has_more_dms.set(msgs.len() == 50);
+                                                    oldest_dm_id.set(older.first().and_then(|m| m.id.clone()));
+                                                    messages.with_mut(|v| {
+                                                        let mut combined = older;
+                                                        combined.append(v);
+                                                        *v = combined;
+                                                    });
+                                                }
+                                            }
+                                        });
+                                    }
+                                },
+                                "Charger plus"
+                            }
+                        }
+                    }
+
+                    // Bouton "Charger les messages précédents"
+                    if *has_more_msgs.read() && direct_chat_with.read().is_none() {
+                        div { class: "flex justify-center py-2 flex-shrink-0",
+                            button {
+                                class: "px-4 py-1.5 rounded-full text-xs font-semibold bg-gray-700 hover:bg-gray-600 text-gray-300 transition",
+                                onclick: move |_| {
+                                    let channel = current_channel.read().clone();
+                                    let before = oldest_msg_id.read().clone();
+                                    if let Some(before_id) = before {
+                                        spawn(async move {
+                                            let client = Client::new();
+                                            let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
+                                            let url = format!("{}/api/messages?channel={}&before_id={}", API_BASE_URL, channel, before_id);
+                                            if let Ok(res) = client
+                                                .get(url)
+                                                .header("Authorization", format!("Bearer {}", token))
+                                                .send()
+                                                .await
+                                            {
+                                                if let Ok(msgs) = res.json::<Vec<shared::Message>>().await {
+                                                    let older: Vec<ChatMessage> = msgs
+                                                        .iter()
+                                                        .map(|m| ChatMessage {
+                                                            author: m.author_name.clone(),
+                                                            content: m.content.clone(),
+                                                            role: m.author_role.clone(),
+                                                            gender: m.author_gender.clone(),
+                                                            is_direct: false,
+                                                            pending: false,
+                                                            created_at: m.created_at,
+                                                            status: MessageStatus::Sent,
+                                                            id: m.id.clone(),
+                                                            pinned: m.pinned,
+                                                        })
+                                                        .collect();
+                                                    has_more_msgs.set(msgs.len() == 100);
+                                                    oldest_msg_id.set(older.first().and_then(|m| m.id.clone()));
+                                                    messages.with_mut(|v| {
+                                                        let mut combined = older;
+                                                        combined.append(v);
+                                                        *v = combined;
+                                                    });
+                                                }
+                                            }
+                                        });
+                                    }
+                                },
+                                "⬆ Charger les messages précédents"
+                            }
                         }
                     }
 

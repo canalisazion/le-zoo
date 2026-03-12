@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::views::{Register, Login, Chat, Navbar};
+use crate::views::{Register, Login, Chat, Navbar, ForgotPassword, ResetPassword};
 
 mod components;
 mod views;
@@ -10,9 +10,15 @@ mod config;
 pub enum Route {
     #[route("/")]
     Register {},
-    
+
     #[route("/login")]
     Login {},
+
+    #[route("/forgot-password")]
+    ForgotPassword {},
+
+    #[route("/reset-password")]
+    ResetPassword {},
 
     #[layout(Navbar)]
         #[route("/chat")]

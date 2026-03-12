@@ -140,7 +140,14 @@ pub fn Login() -> Element {
                 }
 
                 div { class: "mb-6",
-                    label { class: "block mb-2 text-sm text-gray-400", "Mot de passe" }
+                    div { class: "flex items-center justify-between mb-2",
+                        label { class: "text-sm text-gray-400", "Mot de passe" }
+                        Link {
+                            to: Route::ForgotPassword {},
+                            class: "text-xs text-blue-400 hover:underline",
+                            "Mot de passe oublié ?"
+                        }
+                    }
                     input {
                         class: if !err_password.read().is_empty() {
                             "w-full p-3 rounded bg-gray-900 border border-red-500 focus:border-red-400 outline-none transition text-white"

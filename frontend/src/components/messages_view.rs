@@ -1,5 +1,4 @@
 use dioxus::prelude::*;
-use dioxus::document::eval;
 use shared::{Role, MessageStatus};
 use crate::views::chat::ChatMessage;
 use crate::config::API_BASE_URL;
@@ -125,10 +124,10 @@ pub fn MessagesView(messages: Signal<Vec<ChatMessage>>, current_user: Signal<Str
                                     }
 
                                     // Boutons admin
-                                    if is_admin {
-                                        if let Some(msg_id) = &msg.id {
-                                            let id_del = msg_id.clone();
-                                            let id_pin = msg_id.clone();
+                                    if is_admin && msg.id.is_some() {
+                                        {
+                                            let id_del = msg.id.clone().unwrap_or_default();
+                                            let id_pin = msg.id.clone().unwrap_or_default();
                                             rsx! {
                                                 div { class: "flex gap-1 ml-2 mb-1",
                                                     button {
@@ -163,8 +162,8 @@ pub fn MessagesView(messages: Signal<Vec<ChatMessage>>, current_user: Signal<Str
                                                     }
                                                 }
                                             }
-                                        } else { rsx! {} }
-                                    } else { rsx! {} }
+                                        }
+                                    }
 
                                     // Bulle de message — RSS card ou bulle normale
                                     if is_rss {
@@ -185,9 +184,11 @@ pub fn MessagesView(messages: Signal<Vec<ChatMessage>>, current_user: Signal<Str
                                                 style: "background:var(--bg-card);",
                                                     onclick: move |_| {
                                                         let url = lien.clone();
-                                                        let js = format!("window.open({:?}, '_blank');", url);
-                                                        let mut e = eval(&js);
-                                                        spawn(async move { let _ = e.recv::<serde_json::Value>().await; });
+                                                        if url.starts_with("https://") {
+                                                            if let Some(window) = web_sys::window() {
+                                                                let _ = window.open_with_url_and_target(&url, "_blank", "noopener,noreferrer");
+                                                            }
+                                                        }
                                                     },
                                                     div { class: "flex items-center gap-2 mb-2",
                                                         span { class: "text-orange-400 text-xs font-bold uppercase", "{source}" }
@@ -219,11 +220,11 @@ pub fn MessagesView(messages: Signal<Vec<ChatMessage>>, current_user: Signal<Str
                                                                     }
                                                                 }
                                                             } else {
-                                                                rsx! { a { key: "lnk-{j}", href: "{part}", target: "_blank", class: "text-blue-400 underline mr-1 break-all", "{part} " } }
+                                                                rsx! { a { key: "lnk-{j}", href: "{part}", target: "_blank", rel: "noopener noreferrer", class: "text-blue-400 underline mr-1 break-all", "{part} " } }
                                                             }
                                                         } else if is_image_url(part) {
                                                             rsx! {
-                                                                a { key: "img-{j}", href: "{part}", target: "_blank", class: "block mt-1 mb-1",
+                                                                a { key: "img-{j}", href: "{part}", target: "_blank", rel: "noopener noreferrer", class: "block mt-1 mb-1",
                                                                     img {
                                                                         src: "{part}",
                                                                         class: "max-w-full md:max-w-sm rounded-lg hover:opacity-90 transition border border-gray-200 dark:border-gray-700",
@@ -232,7 +233,7 @@ pub fn MessagesView(messages: Signal<Vec<ChatMessage>>, current_user: Signal<Str
                                                                 }
                                                             }
                                                         } else {
-                                                            rsx! { a { key: "lnk-{j}", href: "{part}", target: "_blank", class: "text-blue-400 underline mr-1 break-all", "{part} " } }
+                                                            rsx! { a { key: "lnk-{j}", href: "{part}", target: "_blank", rel: "noopener noreferrer", class: "text-blue-400 underline mr-1 break-all", "{part} " } }
                                                         }
                                                     } else {
                                                         rsx! { span { key: "txt-{j}", class: "mr-1", "{part} " } }
