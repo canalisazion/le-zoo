@@ -186,7 +186,7 @@ pub fn MessagesView(messages: Signal<Vec<ChatMessage>>, current_user: Signal<Str
                                                         let url = lien.clone();
                                                         if url.starts_with("https://") {
                                                             if let Some(window) = web_sys::window() {
-                                                                let _ = window.open_with_url_and_target(&url, "_blank", "noopener,noreferrer");
+                                                                let _ = window.open_with_url_and_target(&url, "_blank");
                                                             }
                                                         }
                                                     },
