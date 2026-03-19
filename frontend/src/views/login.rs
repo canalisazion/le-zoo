@@ -4,10 +4,11 @@ use shared::{User, Role};
 use serde::Deserialize;
 use crate::{Route, config::API_BASE_URL};
 use gloo_storage::{LocalStorage, Storage};
+use crate::fetch_creds::WithCredentials; // ✅ [H-8]
 
+// ✅ [H-8] token absent — JWT en cookie HttpOnly, non exposé au JS
 #[derive(Deserialize, Debug)]
 struct LoginResponse {
-    token: String,
     username: String,
     role: String,
 }
@@ -34,7 +35,7 @@ pub fn Login() -> Element {
         // Client-side validation
         let mut has_error = false;
         if mail.is_empty() {
-            err_email.set("❌ Email requis".to_string());
+            err_email.set("❌ Email ou pseudo requis".to_string());
             has_error = true;
         }
         if pwd.is_empty() {
@@ -65,8 +66,10 @@ pub fn Login() -> Element {
         };
 
         let client = Client::new();
+        // ✅ [H-8] credentials:include pour que le navigateur accepte le Set-Cookie cross-origin
         let response = client.post(format!("{}/api/login", API_BASE_URL))
             .json(&login_data)
+            .with_credentials()
             .send()
             .await;
 
@@ -75,14 +78,14 @@ pub fn Login() -> Element {
                 match res.status().as_u16() {
                     200 => {
                         if let Ok(data) = res.json::<LoginResponse>().await {
-                            let _ = LocalStorage::set("jwt", &data.token);
+                            // ✅ [H-8] JWT en cookie HttpOnly — pas de LocalStorage::set("jwt")
                             let _ = LocalStorage::set("username", &data.username);
                             let _ = LocalStorage::set("role", &data.role);
                             nav.push(Route::Chat {});
                         }
                     }
                     401 => {
-                        status.set("❌ Email ou mot de passe incorrect".to_string());
+                        status.set("❌ Identifiant ou mot de passe incorrect".to_string());
                     }
                     403 => {
                         status.set("🚫 Compte banni".to_string());
@@ -124,13 +127,14 @@ pub fn Login() -> Element {
                 }
 
                 div { class: "mb-4",
-                    label { class: "block mb-2 text-sm text-gray-400", "Email" }
+                    label { class: "block mb-2 text-sm text-gray-400", "Email ou pseudo" }
                     input {
                         class: if !err_email.read().is_empty() {
                             "w-full p-3 rounded bg-gray-900 border border-red-500 focus:border-red-400 outline-none transition text-white"
                         } else {
                             "w-full p-3 rounded bg-gray-900 border border-gray-600 text-white outline-none focus:border-blue-500"
                         },
+                        placeholder: "Email ou nom d'utilisateur",
                         value: "{email}",
                         oninput: move |evt| email.set(evt.value())
                     }

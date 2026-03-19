@@ -1,0 +1,47 @@
+/* ── Variables magazine ── */
+:root {
+  --bg-magazine: #111118;
+  --text-serif: 'Playfair Display', Georgia, serif;
+}
+
+/* ── Navbar responsive ── */
+.nav-links-desktop {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+}
+@media (max-width: 768px) {
+  .nav-links-desktop { display: none !important; }
+}
+.nav-burger {
+  display: none;
+}
+@media (max-width: 768px) {
+  .nav-burger { display: flex !important; align-items: center; }
+}
+
+/* ── Lettrine ── */
+.drop-cap p::first-letter {
+  font-size: 3.5em;
+  float: left;
+  line-height: 0.8;
+  padding-right: 0.1em;
+  color: var(--accent);
+  font-family: var(--text-serif);
+}
+
+/* ── Animations bulle chat ── */
+@keyframes bubble-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.35; }
+  50%       { transform: scale(1.5); opacity: 0; }
+}
+@keyframes bubble-pulse-shadow {
+  0%, 100% { box-shadow: 0 4px 14px rgba(0,0,0,0.45); }
+  50%       { box-shadow: 0 4px 24px rgba(0,0,0,0.7); }
+}
+
+/* ── Globe spin navbar ── */
+@keyframes globe-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}

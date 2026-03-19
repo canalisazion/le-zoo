@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 use dioxus::events::KeyboardEvent;
+use futures_channel::mpsc::UnboundedSender;
 use gloo_storage::{LocalStorage, Storage};
 use shared::{WsClientMsg, Role, MessageStatus};
 use js_sys;
@@ -12,7 +13,7 @@ pub fn MessageInput(
     username: Signal<String>,
     user_role: Signal<Role>,
     mut messages: Signal<Vec<crate::views::chat::ChatMessage>>,
-    mut pending_send: Signal<Option<(String, String)>>,
+    ws_outgoing: Signal<Option<UnboundedSender<String>>>,
 ) -> Element {
     rsx! {
         div {
@@ -27,7 +28,6 @@ pub fn MessageInput(
                 onkeydown: move |evt: KeyboardEvent| {
                     if evt.key() == Key::Enter && !draft.read().is_empty() {
                         let content = draft.read().clone();
-                        let ch = current_channel.read().clone();
                         let direct_target = direct_chat_with.read().clone();
 
                         let json = if let Some(target) = direct_target {
@@ -37,7 +37,9 @@ pub fn MessageInput(
                         };
 
                         if let Some(json_str) = json {
-                            pending_send.set(Some((ch, json_str)));
+                            if let Some(tx) = ws_outgoing.read().clone() {
+                                let _ = tx.unbounded_send(json_str);
+                            }
 
                             let my_username = username.read().clone();
                             let my_role = user_role.read().clone();
@@ -79,7 +81,6 @@ pub fn MessageInput(
                 onclick: move |_| {
                     if !draft.read().is_empty() {
                         let content = draft.read().clone();
-                        let ch = current_channel.read().clone();
                         let direct_target = direct_chat_with.read().clone();
 
                         let json = if let Some(target) = direct_target {
@@ -89,7 +90,9 @@ pub fn MessageInput(
                         };
 
                         if let Some(json_str) = json {
-                            pending_send.set(Some((ch, json_str)));
+                            if let Some(tx) = ws_outgoing.read().clone() {
+                                let _ = tx.unbounded_send(json_str);
+                            }
 
                             let my_username = username.read().clone();
                             let my_role = user_role.read().clone();

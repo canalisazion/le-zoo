@@ -14,17 +14,17 @@ use argon2::password_hash::{SaltString, rand_core::OsRng};
 use bcrypt::verify as bcrypt_verify;
 use dotenvy::dotenv;
 use mongodb::{bson::doc, Client, Database, IndexModel};
-use shared::{User, Channel, Role, MemberInfo, WsClientMsg, WsServerMsg, ChannelWithStats, MessageStatus};
+use shared::{User, Channel, Role, MemberInfo, WsClientMsg, WsServerMsg, ChannelWithStats, MessageStatus, Article, ArticleSummary, ArticleCategory};
 use std::env;
 use std::net::SocketAddr;
 use axum::http::header::{
     AUTHORIZATION, CONTENT_TYPE,
-    STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+    X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
     CONTENT_SECURITY_POLICY, REFERRER_POLICY, SERVER,
 };
 use axum::http::{HeaderName, HeaderValue, Method};
 use tower_http::cors::CorsLayer;
-use jsonwebtoken::{encode, decode, EncodingKey, DecodingKey, Header, Validation};
+use jsonwebtoken::{encode, decode, EncodingKey, DecodingKey, Header, Validation, Algorithm};
 use serde::{Deserialize, Serialize};
 use chrono::{Utc, Duration};
 use tokio::sync::broadcast;
@@ -33,11 +33,6 @@ use dashmap::DashMap;
 use futures_util::{StreamExt, SinkExt};
 use tracing::{info, error, warn};
 use once_cell::sync::Lazy;
-use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Message as EmailMessage, Tokio1Executor,
-    transport::smtp::authentication::Credentials,
-    message::header::ContentType,
-};
 use uuid::Uuid;
 
 // On garde ces imports pour éviter les warnings si du vieux code traîne
@@ -51,8 +46,6 @@ static EMAIL_RE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"^[^@\s]+@
 async fn security_headers_middleware(req: Request, next: Next) -> Response {
     let mut res = next.run(req).await;
     let h = res.headers_mut();
-    h.insert(STRICT_TRANSPORT_SECURITY,
-        HeaderValue::from_static("max-age=31536000; includeSubDomains"));
     h.insert(X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"));
     h.insert(X_FRAME_OPTIONS,
@@ -60,10 +53,16 @@ async fn security_headers_middleware(req: Request, next: Next) -> Response {
     h.insert(CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
             "default-src 'self'; connect-src 'self' wss://lezoo.fr ws://localhost:3000; \
-             script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+             script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
+             font-src 'self' https://fonts.gstatic.com https://fonts.googleapis.com; \
+             img-src 'self' data: https:"
         ));
     h.insert(REFERRER_POLICY,
         HeaderValue::from_static("strict-origin-when-cross-origin"));
+    h.insert(
+        HeaderName::from_static("strict-transport-security"),
+        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+    );
     h.insert(
         HeaderName::from_static("permissions-policy"),
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
@@ -94,9 +93,9 @@ struct AppState {
     jwt_blacklist: Arc<DashMap<String, i64>>,
 }
 
+// ✅ [H-8] token absent du corps — JWT uniquement en cookie HttpOnly
 #[derive(Serialize)]
 struct LoginResponse {
-    token: String,
     username: String,
     role: String,
 }
@@ -156,7 +155,6 @@ struct UpdateAvatarRequest {
 #[derive(Deserialize)]
 struct ReactionRequest {
     message_id: String,
-    #[allow(dead_code)]
     emoji: String,
 }
 
@@ -192,25 +190,71 @@ struct ChangePasswordRequest {
     new_password: String,
 }
 
+#[derive(Deserialize)]
+struct RegisterRequest {
+    username: String,
+    email: String,
+    password: String,
+    gender: String,
+}
+
+#[derive(Deserialize)]
+struct ArticlesQuery {
+    category: Option<String>,
+    limit: Option<i64>,
+    all: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateArticleRequest {
+    title: String,
+    content: String,
+    excerpt: String,
+    category: ArticleCategory,
+    cover_image: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateArticleRequest {
+    title: Option<String>,
+    content: Option<String>,
+    excerpt: Option<String>,
+    category: Option<ArticleCategory>,
+    cover_image: Option<String>,
+    published: Option<bool>,
+}
+
 // --- Helpers ---
 
 fn decode_token(state: &AppState, headers: &HeaderMap) -> Result<Claims, StatusCode> {
-    let auth_header = headers.get("Authorization")
-        .ok_or(StatusCode::UNAUTHORIZED)?
-        .to_str()
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let token = auth_header.strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    // ✅ [H-8] Cookie HttpOnly d'abord, fallback Authorization Bearer
+    let token: String = {
+        let from_cookie = headers.get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|cs| cs.split(';').find_map(|p| {
+                p.trim().strip_prefix("jwt=").map(|t| t.to_string())
+            }));
+        if let Some(t) = from_cookie {
+            t
+        } else if let Some(auth) = headers.get("Authorization") {
+            let s = auth.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
+            s.strip_prefix("Bearer ").ok_or(StatusCode::UNAUTHORIZED)?.to_string()
+        } else {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
     if token.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if state.jwt_blacklist.contains_key(token) {
+    if state.jwt_blacklist.contains_key(&token) {
         return Err(StatusCode::UNAUTHORIZED);
     }
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.leeway = 0;
     decode::<Claims>(
-        token,
+        &token,
         &DecodingKey::from_secret(state.jwt_secret.as_bytes()),
-        &Validation::default(),
+        &validation,
     )
     .map(|data| data.claims)
     .map_err(|_| StatusCode::UNAUTHORIZED)
@@ -218,10 +262,30 @@ fn decode_token(state: &AppState, headers: &HeaderMap) -> Result<Claims, StatusC
 
 fn role_from_str(s: &str) -> Role {
     match s {
+        "dictateur"   => Role::Dictateur,
         "super_admin" => Role::SuperAdmin,
-        "admin" => Role::Admin,
-        _ => Role::User,
+        "admin"       => Role::Admin,
+        _             => Role::User,
     }
+}
+
+fn validate_password(pwd: &str) -> Result<(), &'static str> {
+    if pwd.len() < 8 {
+        return Err("Mot de passe trop court (minimum 8 caractères)");
+    }
+    if !pwd.chars().any(|c| c.is_uppercase()) {
+        return Err("Le mot de passe doit contenir au moins une majuscule");
+    }
+    if !pwd.chars().any(|c| c.is_lowercase()) {
+        return Err("Le mot de passe doit contenir au moins une minuscule");
+    }
+    if !pwd.chars().any(|c| c.is_ascii_digit()) {
+        return Err("Le mot de passe doit contenir au moins un chiffre");
+    }
+    if !pwd.chars().any(|c| !c.is_alphanumeric()) {
+        return Err("Le mot de passe doit contenir au moins un caractère spécial");
+    }
+    Ok(())
 }
 
 fn calculate_badges(user: &shared::User) -> Vec<String> {
@@ -277,16 +341,19 @@ fn check_ip_rate_limit(limiter: &DashMap<String, Vec<i64>>, ip: &str, max: usize
 
 fn sanitize_message(content: &str) -> String {
     content
+        .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
         .chars()
         .take(2000)
         .collect()
 }
 
 fn contains_suspicious_url(content: &str) -> bool {
-    let suspicious = ["bit.ly", "tinyurl", ".exe", ".zip", "discord.gg/"];
+    let suspicious = ["bit.ly", "tinyurl", "t.co", "is.gd", "cutt.ly", "rb.gy",
+                      ".exe", ".zip", ".bat", ".ps1", ".msi", ".dmg", "discord.gg/"];
     suspicious.iter().any(|s| content.to_lowercase().contains(s))
 }
 
@@ -302,50 +369,19 @@ fn regex_escape(s: &str) -> String {
 }
 
 async fn send_email(to_email: &str, subject: &str, html_body: &str) -> bool {
-    let smtp_host = match std::env::var("SMTP_HOST") {
-        Ok(h) if !h.is_empty() => h,
-        _ => {
-            info!("[DEV] Email simulé à <{}> — Sujet: {}", to_email, subject);
-            return true;
-        }
+    use resend_rs::{Resend, types::CreateEmailBaseOptions};
+    let api_key = match std::env::var("RESEND_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => { info!("[DEV] Email simulé à <{}> — Sujet: {}", to_email, subject); return true; }
     };
-    let smtp_user = std::env::var("SMTP_USERNAME").unwrap_or_default();
-    let smtp_pass = std::env::var("SMTP_PASSWORD").unwrap_or_default();
-    let smtp_port: u16 = std::env::var("SMTP_PORT").ok()
-        .and_then(|p| p.parse().ok()).unwrap_or(587);
-    let from_addr = std::env::var("FROM_EMAIL")
-        .unwrap_or_else(|_| "noreply@lezoo.fr".to_string());
-
-    let email = match EmailMessage::builder()
-        .from(format!("Le Zoo <{}>", from_addr).parse().unwrap_or_else(|_| from_addr.parse().unwrap()))
-        .to(match to_email.parse() {
-            Ok(a) => a,
-            Err(e) => { error!("Email adresse invalide {}: {}", to_email, e); return false; }
-        })
-        .subject(subject)
-        .header(ContentType::TEXT_HTML)
-        .body(html_body.to_string())
-    {
-        Ok(m) => m,
-        Err(e) => { error!("Erreur construction email: {}", e); return false; }
-    };
-
-    let creds = Credentials::new(smtp_user, smtp_pass);
-    let transport = if smtp_port == 465 {
-        match AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_host) {
-            Ok(b) => b.port(smtp_port).credentials(creds).build(),
-            Err(e) => { error!("SMTP relay error: {}", e); return false; }
-        }
-    } else {
-        match AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp_host) {
-            Ok(b) => b.port(smtp_port).credentials(creds).build(),
-            Err(e) => { error!("SMTP starttls error: {}", e); return false; }
-        }
-    };
-
-    match transport.send(email).await {
-        Ok(_) => { info!("Email envoyé à {}", to_email); true }
-        Err(e) => { error!("SMTP send error à {}: {}", to_email, e); false }
+    let from = std::env::var("FROM_EMAIL")
+        .unwrap_or_else(|_| "Le Zoo <onboarding@resend.dev>".to_string());
+    let resend = Resend::new(&api_key);
+    let email = CreateEmailBaseOptions::new(&from, [to_email], subject)
+        .with_html(html_body);
+    match resend.emails.send(email).await {
+        Ok(_) => { info!("Email Resend envoyé à {}", to_email); true }
+        Err(e) => { error!("Resend error à {}: {:?}", to_email, e); false }
     }
 }
 
@@ -354,6 +390,212 @@ fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+// --- Article handlers ---
+
+fn slugify(title: &str) -> String {
+    let mut slug = title.to_lowercase();
+    // Translitération basique des accents
+    let replacements = [
+        ("à","a"),("â","a"),("ä","a"),("á","a"),("ã","a"),
+        ("è","e"),("é","e"),("ê","e"),("ë","e"),
+        ("î","i"),("ï","i"),("í","i"),("ì","i"),
+        ("ô","o"),("ö","o"),("ó","o"),("ò","o"),("õ","o"),
+        ("ù","u"),("û","u"),("ü","u"),("ú","u"),
+        ("ç","c"),("ñ","n"),("œ","oe"),("æ","ae"),
+    ];
+    for (from, to) in replacements {
+        slug = slug.replace(from, to);
+    }
+    slug = slug.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
+    // Collapse multiple dashes, trim, truncate
+    while slug.contains("--") { slug = slug.replace("--", "-"); }
+    slug.trim_matches('-').chars().take(80).collect()
+}
+
+async fn list_articles_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ArticlesQuery>,
+) -> impl IntoResponse {
+    use mongodb::options::FindOptions;
+    use futures_util::TryStreamExt;
+
+    let limit = q.limit.unwrap_or(20).min(100);
+
+    // Si ?all=true ET caller est admin → ne pas filtrer par published
+    let show_all = q.all.is_some() && decode_token(&state, &headers)
+        .map(|c| !matches!(role_from_str(&c.role), Role::User))
+        .unwrap_or(false);
+
+    let mut filter = if show_all { doc! {} } else { doc! { "published": true } };
+    if let Some(cat) = &q.category {
+        filter.insert("category", cat);
+    }
+
+    let opts = FindOptions::builder()
+        .sort(doc! { "created_at": -1 })
+        .limit(limit)
+        // Exclure le contenu complet pour alléger la réponse
+        .projection(doc! {
+            "content": 0,
+        })
+        .build();
+
+    let col = state.db.collection::<ArticleSummary>("articles");
+    match col.find(filter, opts).await {
+        Ok(cursor) => {
+            match cursor.try_collect::<Vec<ArticleSummary>>().await {
+                Ok(articles) => (StatusCode::OK, Json(articles)).into_response(),
+                Err(e) => { error!("list_articles cursor: {:?}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }
+            }
+        }
+        Err(e) => { error!("list_articles find: {:?}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }
+    }
+}
+
+async fn get_article_handler(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    let col = state.db.collection::<Article>("articles");
+    match col.find_one(doc! { "slug": &slug, "published": true }, None).await {
+        Ok(Some(article)) => (StatusCode::OK, Json(article)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => { error!("get_article: {:?}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }
+    }
+}
+
+async fn create_article_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateArticleRequest>,
+) -> impl IntoResponse {
+    let claims = match decode_token(&state, &headers) {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
+    if matches!(role_from_str(&claims.role), Role::User) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    // [6] Limites de taille
+    if body.title.chars().count() > 200 {
+        return (StatusCode::BAD_REQUEST, "Titre trop long (max 200 caractères)").into_response();
+    }
+    if body.excerpt.chars().count() > 500 {
+        return (StatusCode::BAD_REQUEST, "Extrait trop long (max 500 caractères)").into_response();
+    }
+    if body.content.len() > 500_000 {
+        return (StatusCode::BAD_REQUEST, "Contenu trop long (max 500 Ko)").into_response();
+    }
+    // [4] Validation cover_image
+    if let Some(ref img) = body.cover_image {
+        if !img.is_empty() && !img.starts_with("https://") {
+            return (StatusCode::BAD_REQUEST, "cover_image doit être vide ou une URL https://").into_response();
+        }
+    }
+
+    let now = Utc::now().timestamp();
+    let base_slug = slugify(&body.title);
+    let mut article = Article {
+        id: None,
+        slug: base_slug.clone(),
+        title: body.title,
+        content: body.content,
+        excerpt: body.excerpt,
+        category: body.category,
+        author_name: claims.username,
+        cover_image: body.cover_image,
+        published: true,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // [9] Boucle anti-doublon slug (E11000)
+    let col = state.db.collection::<Article>("articles");
+    let mut suffix = 0u32;
+    loop {
+        match col.insert_one(&article, None).await {
+            Ok(_) => return (StatusCode::CREATED, Json(article)).into_response(),
+            Err(e) => {
+                let err_str = format!("{:?}", e);
+                if err_str.contains("E11000") && suffix < 100 {
+                    suffix += 1;
+                    article.slug = format!("{}-{}", base_slug, suffix);
+                } else {
+                    error!("create_article: {:?}", e);
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            }
+        }
+    }
+}
+
+async fn update_article_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(body): Json<UpdateArticleRequest>,
+) -> impl IntoResponse {
+    let claims = match decode_token(&state, &headers) {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
+    if matches!(role_from_str(&claims.role), Role::User) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    // [4] Validation cover_image
+    if let Some(ref img) = body.cover_image {
+        if !img.is_empty() && !img.starts_with("https://") {
+            return (StatusCode::BAD_REQUEST, "cover_image doit être vide ou une URL https://").into_response();
+        }
+    }
+
+    let now = Utc::now().timestamp();
+    let mut set = doc! { "updated_at": now };
+    if let Some(v) = body.title    { set.insert("title", v); }
+    if let Some(v) = body.content  { set.insert("content", v); }
+    if let Some(v) = body.excerpt  { set.insert("excerpt", v); }
+    if let Some(v) = body.published { set.insert("published", v); }
+    if let Some(v) = body.cover_image { set.insert("cover_image", v); }
+    if let Some(v) = body.category {
+        set.insert("category", v.to_string());
+    }
+
+    let col = state.db.collection::<Article>("articles");
+    match col.update_one(doc! { "slug": &slug }, doc! { "$set": set }, None).await {
+        Ok(r) if r.matched_count == 0 => StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => { error!("update_article: {:?}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }
+    }
+}
+
+async fn delete_article_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    let claims = match decode_token(&state, &headers) {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
+    if matches!(role_from_str(&claims.role), Role::User) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let col = state.db.collection::<Article>("articles");
+    match col.update_one(
+        doc! { "slug": &slug },
+        doc! { "$set": { "published": false, "updated_at": Utc::now().timestamp() } },
+        None
+    ).await {
+        Ok(r) if r.matched_count == 0 => StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => { error!("delete_article: {:?}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }
+    }
 }
 
 // --- Main ---
@@ -427,6 +669,20 @@ async fn main() {
         let _ = reset_col.create_index(idx_email, None).await;
     }
 
+    {
+        use mongodb::options::IndexOptions;
+        let articles_col = state.db.collection::<Article>("articles");
+        let idx_slug = IndexModel::builder()
+            .keys(doc! { "slug": 1 })
+            .options(IndexOptions::builder().unique(true).build())
+            .build();
+        let idx_cat = IndexModel::builder()
+            .keys(doc! { "category": 1, "created_at": -1 })
+            .build();
+        let _ = articles_col.create_index(idx_slug, None).await;
+        let _ = articles_col.create_index(idx_cat, None).await;
+    }
+
     // Initialisation des salons dorés
     let channels_collection = state.db.collection::<Channel>("channels");
     let gold_channels = vec![
@@ -467,14 +723,15 @@ async fn main() {
         if let Ok(Some(_)) = users_collection.find_one(doc! { "username": &superadmin_username }, None).await {
             let _ = users_collection.update_one(
                 doc! { "username": &superadmin_username },
-                doc! { "$set": { "role": "super_admin" } },
+                doc! { "$set": { "role": "dictateur" } },
                 None
             ).await;
-            info!("SuperAdmin défini : {}", superadmin_username);
+            info!("Dictateur défini : {}", superadmin_username);
         }
     }
 
     // --- CORS prod-ready ---
+    // ✅ [H-8] allow_credentials requis pour les cookies HttpOnly cross-origin
     let cors = CorsLayer::new()
         .allow_origin(
             std::env::var("ALLOWED_ORIGIN")
@@ -484,7 +741,8 @@ async fn main() {
                 .collect::<Vec<_>>()
         )
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-        .allow_headers([AUTHORIZATION, CONTENT_TYPE]);
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE])
+        .allow_credentials(true);
 
     // --- JWT BLACKLIST CLEANUP ---
     {
@@ -508,6 +766,7 @@ async fn main() {
         .route("/api/auth/forgot-password", post(forgot_password_handler))
         .route("/api/auth/reset-password", post(reset_password_handler))
         .route("/api/auth/change-password", post(change_password_handler))
+        .route("/api/logout", post(logout_handler)) // ✅ [H-8]
         .route("/api/channels", get(channels_handler).post(create_channel_handler))
         .route("/api/channels/discover", get(discover_channels_handler))
         .route("/api/channels/:id", delete(delete_channel_handler))
@@ -527,9 +786,13 @@ async fn main() {
         .route("/api/direct_messages", get(direct_messages_handler))
         .route("/api/direct_messages/read", post(mark_direct_message_read_handler))
         .route("/ws", get(ws_handler))
+        .route("/api/articles", get(list_articles_handler).post(create_article_handler))
+        .route("/api/articles/:slug", get(get_article_handler))
+        .route("/api/articles/:slug/edit", post(update_article_handler))
+        .route("/api/articles/:slug/delete", delete(delete_article_handler))
         .layer(middleware::from_fn(security_headers_middleware))
         .layer(cors)
-        .layer(DefaultBodyLimit::max(2_097_152))
+        .layer(DefaultBodyLimit::max(1_000_000))
         .with_state(state);
 
     // --- RSS NEWS BACKGROUND TASK ---
@@ -537,7 +800,7 @@ async fn main() {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
-            let colab_url = std::env::var("COLAB_AI_URL")
+            let colab_url = std::env::var("AI_URL")
                 .unwrap_or_else(|_| "http://localhost:5000/generate".to_string());
 
             // (feed_url, target_channel, source_name, is_english)
@@ -660,6 +923,34 @@ async fn main() {
 
 async fn health_check() -> &'static str { "OK" }
 
+// ✅ [H-8] Déconnexion : blacklist JWT + effacement cookie HttpOnly
+async fn logout_handler(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let token = {
+        let from_cookie = headers.get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|cs| cs.split(';').find_map(|p| p.trim().strip_prefix("jwt=").map(|t| t.to_string())));
+        if let Some(t) = from_cookie { t } else {
+            headers.get("Authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer ").map(|t| t.to_string()))
+                .unwrap_or_default()
+        }
+    };
+    if !token.is_empty() {
+        let mut val = Validation::new(Algorithm::HS256);
+        val.leeway = 0;
+        if let Ok(data) = decode::<Claims>(&token, &DecodingKey::from_secret(state.jwt_secret.as_bytes()), &val) {
+            state.jwt_blacklist.insert(token, data.claims.exp as i64);
+        }
+    }
+    let clear = "jwt=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0";
+    let mut resp = (StatusCode::OK, "Déconnecté").into_response();
+    if let Ok(hv) = HeaderValue::from_str(clear) {
+        resp.headers_mut().insert(axum::http::header::SET_COOKIE, hv);
+    }
+    resp
+}
+
 async fn delete_message_handler(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> impl IntoResponse {
     use mongodb::bson::oid::ObjectId;
     let claims = match decode_token(&state, &headers) {
@@ -720,8 +1011,10 @@ async fn archive_channel_handler(
         Ok(c) => c,
         Err(s) => return (s, "Token invalide").into_response(),
     };
-    let is_super = role_from_str(&claims.role) == Role::SuperAdmin
-        && (state.superadmin_username.is_empty() || claims.username == state.superadmin_username);
+    let caller_role_s = role_from_str(&claims.role);
+    let is_super = caller_role_s == Role::Dictateur
+        || (caller_role_s == Role::SuperAdmin
+            && (state.superadmin_username.is_empty() || claims.username == state.superadmin_username));
     if !is_super {
         return (StatusCode::FORBIDDEN, "SuperAdmin requis").into_response();
     }
@@ -759,7 +1052,7 @@ async fn archive_channel_handler(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let colab_url = std::env::var("COLAB_AI_URL")
+    let colab_url = std::env::var("AI_URL")
         .unwrap_or_else(|_| "http://localhost:5000/generate".to_string());
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -861,10 +1154,10 @@ async fn messages_handler(State(state): State<AppState>, headers: HeaderMap, Que
         }
     }
 
-    // Récupérer les 100 derniers (tri desc), puis inverser pour ordre chronologique
+    // ✅ [M-4] Récupérer les 200 derniers (tri desc), puis inverser pour ordre chronologique
     let options = FindOptions::builder()
         .sort(doc! { "_id": -1 })
-        .limit(100)
+        .limit(200)
         .build();
 
     match collection.find(filter, options).await {
@@ -1039,7 +1332,16 @@ async fn update_avatar_handler(State(state): State<AppState>, headers: HeaderMap
         Err(s) => return (s, "Token invalide").into_response(),
     };
     if req.avatar.len() > 500000 { return (StatusCode::BAD_REQUEST, "Trop gros").into_response(); }
-    let _ = state.db.collection::<User>("users").update_one(doc! { "username": &claims.username }, doc! { "$set": { "avatar": &req.avatar } }, None).await;
+    // Valider que l'avatar est un data URI image ou une URL https (pas de JS/SVG arbitraire)
+    let av = req.avatar.trim();
+    let is_valid_avatar = av.starts_with("data:image/png;base64,")
+        || av.starts_with("data:image/jpeg;base64,")
+        || av.starts_with("data:image/jpg;base64,")
+        || av.starts_with("data:image/gif;base64,")
+        || av.starts_with("data:image/webp;base64,")
+        || av.starts_with("https://");
+    if !is_valid_avatar { return (StatusCode::BAD_REQUEST, "Format avatar invalide").into_response(); }
+    let _ = state.db.collection::<User>("users").update_one(doc! { "username": &claims.username }, doc! { "$set": { "avatar": av } }, None).await;
     (StatusCode::OK, "Avatar maj").into_response()
 }
 
@@ -1069,35 +1371,91 @@ async fn delete_account_handler(
         return (StatusCode::FORBIDDEN, "Mot de passe incorrect").into_response();
     }
     let _ = col.delete_one(doc! { "username": &claims.username }, None).await;
+    // Anonymiser les messages de l'utilisateur supprimé
+    let _ = state.db.collection::<shared::Message>("messages").update_many(
+        doc! { "author_name": &claims.username },
+        doc! { "$set": { "author_name": "[supprimé]" } },
+        None,
+    ).await;
     info!("Compte supprimé : {}", claims.username);
-    // Blacklist the JWT so it can't be reused
-    let token_str = headers.get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("")
-        .to_string();
+    // Blacklist the current JWT
+    let token_str = {
+        let from_cookie = headers.get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|cs| cs.split(';').find_map(|p| p.trim().strip_prefix("jwt=").map(|t| t.to_string())));
+        if let Some(t) = from_cookie { t } else {
+            headers.get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .unwrap_or("").to_string()
+        }
+    };
     if !token_str.is_empty() {
         state.jwt_blacklist.insert(token_str, claims.exp as i64);
     }
-    (StatusCode::OK, "Compte supprimé").into_response()
+    // ✅ [H-8] Effacer le cookie HttpOnly
+    let clear = "jwt=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0";
+    let mut resp = (StatusCode::OK, "Compte supprimé").into_response();
+    if let Ok(hv) = HeaderValue::from_str(clear) {
+        resp.headers_mut().insert(axum::http::header::SET_COOKIE, hv);
+    }
+    resp
 }
 
 async fn react_to_message_handler(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<ReactionRequest>) -> impl IntoResponse {
     use mongodb::bson::oid::ObjectId;
+    use mongodb::options::UpdateOptions;
     let claims = match decode_token(&state, &headers) {
         Ok(c) => c,
         Err(s) => return (s, "Token invalide").into_response(),
     };
+    if req.emoji.is_empty() || req.emoji.chars().count() > 10 {
+        return (StatusCode::BAD_REQUEST, "Emoji invalide (1-10 caractères)").into_response();
+    }
+    if req.message_id.len() != 24 {
+        return (StatusCode::BAD_REQUEST, "ID invalide").into_response();
+    }
     let oid = match ObjectId::parse_str(&req.message_id) {
         Ok(i) => i,
         Err(_) => return (StatusCode::BAD_REQUEST, "ID invalide").into_response(),
     };
-    let _ = state.db.collection::<shared::Message>("messages").update_one(
-        doc! { "_id": oid },
-        doc! { "$addToSet": { format!("reactions.$[elem].users"): &claims.username } },
-        None
-    ).await;
-    (StatusCode::OK, "Réaction ajoutée").into_response()
+    let col = state.db.collection::<shared::Message>("messages");
+    let msg = match col.find_one(doc! { "_id": oid }, None).await {
+        Ok(Some(m)) => m,
+        _ => return (StatusCode::NOT_FOUND, "Message introuvable").into_response(),
+    };
+    let existing = msg.reactions.iter().find(|r| r.emoji == req.emoji);
+    let result = if let Some(reaction) = existing {
+        let opts = UpdateOptions::builder()
+            .array_filters(vec![doc! { "elem.emoji": &req.emoji }])
+            .build();
+        if reaction.users.contains(&claims.username) {
+            // Toggle OFF : retirer l'utilisateur
+            col.update_one(
+                doc! { "_id": oid },
+                doc! { "$pull": { "reactions.$[elem].users": &claims.username } },
+                opts,
+            ).await
+        } else {
+            // Toggle ON : ajouter l'utilisateur à l'entrée existante
+            col.update_one(
+                doc! { "_id": oid },
+                doc! { "$addToSet": { "reactions.$[elem].users": &claims.username } },
+                opts,
+            ).await
+        }
+    } else {
+        // Nouvel emoji : créer l'entrée
+        col.update_one(
+            doc! { "_id": oid },
+            doc! { "$push": { "reactions": { "emoji": &req.emoji, "users": [&claims.username] } } },
+            None,
+        ).await
+    };
+    match result {
+        Ok(_) => (StatusCode::OK, "OK").into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Erreur").into_response(),
+    }
 }
 
 async fn promote_handler(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<PromoteRequest>) -> impl IntoResponse {
@@ -1107,14 +1465,18 @@ async fn promote_handler(State(state): State<AppState>, headers: HeaderMap, Json
     };
     let caller_role = role_from_str(&claims.role);
     if !caller_role.is_at_least_admin() { return (StatusCode::FORBIDDEN, "Interdit").into_response(); }
-    // Whitelist stricte : seuls "user" et "admin" sont des valeurs acceptables
-    if req.role != "user" && req.role != "admin" {
+    // Whitelist des rôles assignables
+    let allowed = ["user", "admin", "super_admin", "dictateur"];
+    if !allowed.contains(&req.role.as_str()) {
         return (StatusCode::BAD_REQUEST, "Rôle invalide").into_response();
     }
-    // Seul le SuperAdmin désigné (env var) peut accorder ou révoquer le rôle super_admin
-    if req.role == "super_admin" || role_from_str(&req.role) == Role::SuperAdmin {
-        if state.superadmin_username.is_empty() || claims.username != state.superadmin_username {
-            return (StatusCode::FORBIDDEN, "Seul le SuperAdmin peut attribuer ce rôle").into_response();
+    // super_admin et dictateur : réservés au Dictateur ou au SuperAdmin désigné
+    if req.role == "super_admin" || req.role == "dictateur" {
+        let is_dictateur = caller_role == Role::Dictateur;
+        let is_designated_super = caller_role == Role::SuperAdmin
+            && (state.superadmin_username.is_empty() || claims.username == state.superadmin_username);
+        if !is_dictateur && !is_designated_super {
+            return (StatusCode::FORBIDDEN, "Seul le Dictateur ou le SuperAdmin désigné peut attribuer ce rôle").into_response();
         }
     }
     let _ = state.db.collection::<User>("users").update_one(doc! { "username": &req.username }, doc! { "$set": { "role": &req.role } }, None).await;
@@ -1145,50 +1507,86 @@ async fn ban_handler(State(state): State<AppState>, headers: HeaderMap, Json(req
     (StatusCode::OK, "Banni").into_response()
 }
 
-async fn create_channel_handler(State(state): State<AppState>, headers: HeaderMap, Json(new_channel): Json<Channel>) -> impl IntoResponse {
+async fn create_channel_handler(State(state): State<AppState>, headers: HeaderMap, Json(mut new_channel): Json<Channel>) -> impl IntoResponse {
     let claims = match decode_token(&state, &headers) {
         Ok(c) => c,
         Err(s) => return (s, "Token manquant ou invalide").into_response(),
     };
     let caller_role = role_from_str(&claims.role);
     if !caller_role.is_at_least_admin() { return (StatusCode::FORBIDDEN, "Interdit").into_response(); }
+    // Validation champs salon
+    if new_channel.name.trim().is_empty() || new_channel.name.len() > 50 {
+        return (StatusCode::BAD_REQUEST, "Nom de salon invalide (1-50 caractères)").into_response();
+    }
+    if new_channel.description.len() > 200 {
+        return (StatusCode::BAD_REQUEST, "Description trop longue (max 200 caractères)").into_response();
+    }
+    if let Some(ref id) = new_channel.id {
+        if !is_valid_channel_id(id) {
+            return (StatusCode::BAD_REQUEST, "ID de salon invalide").into_response();
+        }
+    }
+    // Forcer is_gold=false et is_locked=false pour canaux créés via API
+    new_channel.is_gold = false;
+    new_channel.is_locked = false;
     let _ = state.db.collection::<Channel>("channels").insert_one(new_channel, None).await;
     (StatusCode::CREATED, "Salon créé").into_response()
 }
 
 async fn discover_channels_handler(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     use futures_util::stream::TryStreamExt;
-    use mongodb::options::FindOptions;
+    use mongodb::bson::Bson;
+    use std::collections::HashMap;
     let _ = match decode_token(&state, &headers) {
         Ok(c) => c,
         Err(s) => return (s, "Token invalide").into_response(),
     };
-    let cursor = match state.db.collection::<Channel>("channels").find(doc! { "$or": [ { "deleted": false }, { "deleted": { "$exists": false } } ] }, None).await {
-        Ok(c) => c,
+    // 1. Récupérer tous les salons actifs
+    let channels = match state.db.collection::<Channel>("channels")
+        .find(doc! { "$or": [{ "deleted": false }, { "deleted": { "$exists": false } }] }, None)
+        .await
+    {
+        Ok(c) => c.try_collect::<Vec<Channel>>().await.unwrap_or_default(),
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Erreur DB").into_response(),
     };
-    let channels = cursor.try_collect::<Vec<Channel>>().await.unwrap_or_default();
-    let mut stats = Vec::new();
-    for c in channels {
-        let cid = c.id.clone().unwrap_or_default();
-        let count = state.db.collection::<shared::Message>("messages").count_documents(doc! { "channel_id": &cid }, None).await.unwrap_or(0);
-        let snippet = {
-            let opts = FindOptions::builder().sort(doc! { "created_at": -1 }).limit(1).build();
-            if let Ok(mut cursor) = state.db.collection::<shared::Message>("messages").find(doc! { "channel_id": &cid }, opts).await {
-                if let Ok(Some(msg)) = cursor.try_next().await {
-                    let preview = if msg.content.len() > 60 {
-                        format!("{}...", &msg.content[..60])
-                    } else {
-                        msg.content.clone()
-                    };
-                    Some(preview)
-                } else {
-                    None
-                }
-            } else {
-                None
+
+    // 2. Un seul aggregate : count + dernier message par salon
+    let channel_ids: Vec<Bson> = channels.iter()
+        .filter_map(|c| c.id.as_ref().map(|id| Bson::String(id.clone())))
+        .collect();
+    let pipeline = vec![
+        doc! { "$match": {
+            "channel_id": { "$in": channel_ids },
+            "$or": [{ "deleted": { "$exists": false } }, { "deleted": false }]
+        }},
+        doc! { "$sort": { "created_at": -1 } },
+        doc! { "$group": {
+            "_id": "$channel_id",
+            "count": { "$sum": 1 },
+            "last_content": { "$first": "$content" }
+        }},
+    ];
+    let mut stats_map: HashMap<String, (i64, Option<String>)> = HashMap::new();
+    if let Ok(mut cursor) = state.db.collection::<shared::Message>("messages")
+        .aggregate(pipeline, None).await
+    {
+        while let Ok(Some(doc)) = cursor.try_next().await {
+            if let Ok(id) = doc.get_str("_id") {
+                let count = doc.get("count")
+                    .and_then(|b| b.as_i64().or_else(|| b.as_i32().map(|n| n as i64)))
+                    .unwrap_or(0);
+                let snippet = doc.get_str("last_content").ok().map(|s| {
+                    if s.len() > 60 { format!("{}...", &s[..60]) } else { s.to_string() }
+                });
+                stats_map.insert(id.to_string(), (count, snippet));
             }
-        };
+        }
+    }
+
+    // 3. Assembler le résultat
+    let mut result: Vec<ChannelWithStats> = channels.into_iter().map(|c| {
+        let cid = c.id.clone().unwrap_or_default();
+        let (count, snippet) = stats_map.remove(&cid).unwrap_or((0, None));
         let media_tag = if let Some(ref media) = c.topic_media {
             let m_lower = media.to_lowercase();
             if m_lower.contains("youtube.com") || m_lower.contains("youtu.be") {
@@ -1201,10 +1599,10 @@ async fn discover_channels_handler(State(state): State<AppState>, headers: Heade
         } else {
             Some("💬 Libre sujet".to_string())
         };
-        stats.push(ChannelWithStats { channel: c, message_count: count as i64, last_message_snippet: snippet, media_tag });
-    }
-    stats.sort_by(|a, b| b.message_count.cmp(&a.message_count));
-    (StatusCode::OK, Json(stats)).into_response()
+        ChannelWithStats { channel: c, message_count: count, last_message_snippet: snippet, media_tag }
+    }).collect();
+    result.sort_by(|a, b| b.message_count.cmp(&a.message_count));
+    (StatusCode::OK, Json(result)).into_response()
 }
 
 async fn subscribe_channel_handler(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<SubscribeRequest>) -> impl IntoResponse {
@@ -1226,6 +1624,7 @@ async fn delete_channel_handler(State(state): State<AppState>, headers: HeaderMa
         Err(s) => return (s, "Token invalide").into_response(),
     };
     if !role_from_str(&claims.role).is_at_least_admin() { return (StatusCode::FORBIDDEN, "Interdit").into_response(); }
+    if !is_valid_channel_id(&id) { return (StatusCode::BAD_REQUEST, "ID de salon invalide").into_response(); }
     let _ = state.db.collection::<Channel>("channels").update_one(doc! { "id": id }, doc! { "$set": { "deleted": true } }, None).await;
     (StatusCode::OK, "Supprimé").into_response()
 }
@@ -1242,8 +1641,10 @@ async fn summarize_channel_handler(
         Ok(c) => c,
         Err(s) => return (s, "Token invalide").into_response(),
     };
-    let is_super = role_from_str(&claims.role) == Role::SuperAdmin
-        && (state.superadmin_username.is_empty() || claims.username == state.superadmin_username);
+    let caller_role_s = role_from_str(&claims.role);
+    let is_super = caller_role_s == Role::Dictateur
+        || (caller_role_s == Role::SuperAdmin
+            && (state.superadmin_username.is_empty() || claims.username == state.superadmin_username));
     if !is_super {
         return (StatusCode::FORBIDDEN, "SuperAdmin requis").into_response();
     }
@@ -1276,7 +1677,7 @@ async fn summarize_channel_handler(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let colab_url = std::env::var("COLAB_AI_URL")
+    let colab_url = std::env::var("AI_URL")
         .unwrap_or_else(|_| "http://localhost:5000/generate".to_string());
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -1309,9 +1710,13 @@ async fn summarize_channel_handler(
 
 // --- WEBSOCKET HANDLERS ---
 
-/// Le token JWT ne passe plus par l'URL — il arrive dans le premier message WS.
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+/// ✅ [H-8] Authentification via cookie HttpOnly sur la requête d'upgrade WebSocket.
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let claims = match decode_token(&state, &headers) {
+        Ok(c) => c,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    ws.on_upgrade(move |socket| handle_socket(socket, state, claims))
 }
 
 async fn broadcast_presence(state: &AppState) {
@@ -1321,12 +1726,13 @@ async fn broadcast_presence(state: &AppState) {
     }
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+// ✅ [H-8] Claims déjà validés par ws_handler — on attend juste le choix du salon.
+async fn handle_socket(socket: WebSocket, state: AppState, claims: Claims) {
     let (mut sink, mut stream) = socket.split();
 
-    // === PHASE D'AUTHENTIFICATION (délai max 5 secondes) ===
-    // Le client doit envoyer {"type":"auth","token":"<JWT>","channel":"<id>"} en premier.
-    let auth_result = tokio::time::timeout(
+    // === SÉLECTION DU SALON (délai max 5 secondes) ===
+    // Le client envoie {"type":"auth","channel":"<id>"} — token non requis (cookie déjà validé).
+    let channel_result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         async {
             loop {
@@ -1334,14 +1740,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Some(Ok(WsMsg::Text(text))) => {
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
                             if val.get("type").and_then(|t| t.as_str()) == Some("auth") {
-                                let token = val["token"].as_str().unwrap_or("").to_string();
                                 let channel = val["channel"].as_str().unwrap_or("general").to_string();
-                                return Some((token, channel));
+                                return Some(channel);
                             }
                         }
-                        // Message non-auth avant authentification → ignoré
                     }
-                    Some(Ok(_)) => {} // Ping/Pong/Binary → ignoré
+                    Some(Ok(_)) => {}
                     Some(Err(_)) | None => return None,
                 }
             }
@@ -1349,10 +1753,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     )
     .await;
 
-    let (token_str, channel_id) = match auth_result {
-        Ok(Some(pair)) => pair,
+    let channel_id = match channel_result {
+        Ok(Some(ch)) => ch,
         Ok(None) | Err(_) => {
-            // Timeout ou fermeture sans auth valide
             let _ = sink.send(WsMsg::Close(None)).await;
             return;
         }
@@ -1362,19 +1765,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         let _ = sink.send(WsMsg::Close(None)).await;
         return;
     }
-
-    let claims = match decode::<Claims>(
-        &token_str,
-        &DecodingKey::from_secret(state.jwt_secret.as_bytes()),
-        &Validation::default(),
-    ) {
-        Ok(d) => d.claims,
-        Err(_) => {
-            let _ = sink.send(WsMsg::Text(r#"{"error":"Token invalide"}"#.to_string())).await;
-            let _ = sink.send(WsMsg::Close(None)).await;
-            return;
-        }
-    };
 
     let username = claims.username;
     let role_str = claims.role;
@@ -1392,11 +1782,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut p_rx = state.presence_tx.subscribe();
 
     let mut send_task = tokio::spawn(async move {
+        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             tokio::select! {
                 Ok(m) = c_rx.recv() => { if sink.send(WsMsg::Text(m)).await.is_err() { break; } }
                 Ok(m) = u_rx.recv() => { if sink.send(WsMsg::Text(m)).await.is_err() { break; } }
                 Ok(m) = p_rx.recv() => { if sink.send(WsMsg::Text(m)).await.is_err() { break; } }
+                _ = ping_interval.tick() => { if sink.send(WsMsg::Ping(vec![])).await.is_err() { break; } }
             }
         }
     });
@@ -1450,15 +1842,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         {
                             let bad_words = ["connard", "pute", "merde", "fdp", "ntm", "nique"];
                             let lower = content.to_lowercase();
-                            let flagged = content.len() > 50 && bad_words.iter().any(|w| lower.contains(w));
+                            let flagged = bad_words.iter().any(|w| lower.contains(w));
                             if flagged {
                                 let mod_db = state_c.db.clone();
                                 let mod_channel = channel_id.clone();
                                 let mod_author = username_c.clone();
-                                let mod_colab = std::env::var("COLAB_AI_URL")
+                                let mod_colab = std::env::var("AI_URL")
                                     .unwrap_or_else(|_| "http://localhost:5000/generate".to_string());
                                 let mod_presence = state_c.presence_tx.clone();
                                 let mod_content = content.clone();
+                                let mod_channels_tx = state_c.channels_tx.clone();
                                 tokio::spawn(async move {
                                     let client = reqwest::Client::builder()
                                         .timeout(std::time::Duration::from_secs(15))
@@ -1481,6 +1874,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                         doc! { "$set": { "deleted": true } },
                                                         None
                                                     ).await;
+                                                    // Notifier les clients : retirer le message de leur vue
+                                                    if let Ok(j) = serde_json::to_string(&WsServerMsg::MessageDeleted { id: oid.to_hex() }) {
+                                                        if let Some(ch_tx) = mod_channels_tx.get(&mod_channel) {
+                                                            let _ = ch_tx.send(j);
+                                                        }
+                                                    }
                                                 }
                                                 info!("MODÉRATION IA: message supprimé dans #{} (auteur: {})", mod_channel, mod_author);
                                                 let _ = mod_presence.send(format!(
@@ -1497,6 +1896,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     WsClientMsg::DirectMessage { to, content } => {
                         let content = sanitize_message(&content);
                         if !check_rate_limit(&state_c, &username_c).await { continue; }
+                        // [2] Bloquer DM à soi-même
+                        if to == username_c { continue; }
+                        // [2] Vérifier que le destinataire existe et n'est pas banni
+                        let recipient = state_c.db.collection::<User>("users")
+                            .find_one(doc! { "username": &to }, None).await;
+                        match recipient {
+                            Ok(Some(u)) if u.banned => continue,
+                            Ok(Some(_)) => {}
+                            _ => continue,
+                        }
                         let new_msg = shared::Message {
                             id: None,
                             channel_id: "direct".to_string(),
@@ -1565,7 +1974,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     broadcast_presence(&state).await;
 }
 
-async fn register_handler(State(state): State<AppState>, headers: HeaderMap, Json(mut user): Json<User>) -> impl IntoResponse {
+async fn register_handler(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<RegisterRequest>) -> impl IntoResponse {
     let ip = headers.get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
@@ -1577,37 +1986,60 @@ async fn register_handler(State(state): State<AppState>, headers: HeaderMap, Jso
         return (StatusCode::TOO_MANY_REQUESTS, "Trop de tentatives").into_response();
     }
     // Validation username: 3-20 chars, alphanumeric + underscore
-    if !USERNAME_RE.is_match(&user.username) {
+    if !USERNAME_RE.is_match(&req.username) {
         return (StatusCode::BAD_REQUEST, "Username invalide : 3-20 caractères, lettres/chiffres/underscore uniquement").into_response();
     }
     // Validation email
-    if !EMAIL_RE.is_match(&user.email) {
+    if !EMAIL_RE.is_match(&req.email) {
         return (StatusCode::BAD_REQUEST, "Email invalide").into_response();
     }
-    // Validation password: min 8 chars
-    let pwd_raw = match &user.password {
-        Some(p) if p.len() >= 8 => p.clone(),
-        Some(_) => return (StatusCode::BAD_REQUEST, "Mot de passe trop court (minimum 8 caractères)").into_response(),
-        None => return (StatusCode::BAD_REQUEST, "Mot de passe manquant").into_response(),
-    };
+    // Validation password
+    if let Err(msg) = validate_password(&req.password) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
     let col = state.db.collection::<User>("users");
     // Unicité username
-    if col.find_one(doc! { "username": &user.username }, None).await.unwrap_or(None).is_some() {
+    if col.find_one(doc! { "username": &req.username }, None).await.unwrap_or(None).is_some() {
         return (StatusCode::CONFLICT, "Ce nom d'utilisateur est déjà pris").into_response();
     }
     // Unicité email
-    if col.find_one(doc! { "email": &user.email }, None).await.unwrap_or(None).is_some() {
+    if col.find_one(doc! { "email": &req.email }, None).await.unwrap_or(None).is_some() {
         return (StatusCode::CONFLICT, "Cet email est déjà utilisé").into_response();
     }
     let salt = SaltString::generate(&mut OsRng);
-    let pwd = match Argon2::default().hash_password(pwd_raw.as_bytes(), &salt) {
+    let pwd = match Argon2::default().hash_password(req.password.as_bytes(), &salt) {
         Ok(h) => h.to_string(),
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Erreur hash").into_response(),
     };
-    user.password = Some(pwd);
-    user.role = Role::User;
-    user.created_at = Utc::now().timestamp();
+    let user = User {
+        id: None,
+        username: req.username.clone(),
+        email: req.email.clone(),
+        password: Some(pwd),
+        role: Role::User,
+        gender: req.gender,
+        created_at: Utc::now().timestamp(),
+        banned: false,
+        avatar: None,
+        subscribed_channels: vec!["general".to_string()],
+        is_premium: false,
+        message_count: 0,
+        days_active: 0,
+        channels_joined: 1,
+    };
+    let welcome_username = req.username.clone();
+    let welcome_email = req.email.clone();
     let _ = col.insert_one(user, None).await;
+    let welcome_html = format!(r#"<!DOCTYPE html>
+<html lang="fr"><body style="margin:0;background:#111827;font-family:Arial,sans-serif;">
+<div style="max-width:520px;margin:40px auto;background:#1f2937;border-radius:12px;padding:36px;border:1px solid #374151;">
+  <h2 style="color:#34d399;margin-top:0;">🎉 Bienvenue sur Le Zoo !</h2>
+  <p style="color:#d1d5db;">Bonjour <strong style="color:#f9fafb;">{}</strong>,</p>
+  <p style="color:#d1d5db;">Ton compte a bien été créé. Tu peux maintenant te connecter et rejoindre la communauté.</p>
+  <p style="color:#6b7280;font-size:12px;margin-bottom:0;">— L'équipe Le Zoo</p>
+</div>
+</body></html>"#, welcome_username);
+    send_email(&welcome_email, "Bienvenue sur Le Zoo 🎉", &welcome_html).await;
     (StatusCode::CREATED, "OK").into_response()
 }
 
@@ -1662,7 +2094,7 @@ async fn login_handler(
         }
     }
 
-    let user = match col.find_one(doc! { "email": &login_data.email }, None).await.unwrap_or(None) {
+    let user = match col.find_one(doc! { "$or": [{ "email": &login_data.email }, { "username": &login_data.email }] }, None).await.unwrap_or(None) {
         Some(u) if u.banned => {
             return (StatusCode::FORBIDDEN, "Compte banni").into_response();
         }
@@ -1702,9 +2134,19 @@ async fn login_handler(
         Ok(t) => t,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Erreur").into_response(),
     };
-    let response = LoginResponse { token, username: user.username, role: user.role.to_string() };
-    info!("Connexion: {}", response.username);
-    (StatusCode::OK, Json(response)).into_response()
+    // ✅ [H-8] JWT en cookie HttpOnly — Secure uniquement en HTTPS (prod)
+    let secure_flag = if std::env::var("HTTPS").as_deref() == Ok("true") { "; Secure" } else { "" };
+    let cookie_val = format!(
+        "jwt={}; HttpOnly{}; SameSite=Lax; Path=/; Max-Age=86400",
+        token, secure_flag
+    );
+    let response_body = LoginResponse { username: user.username.clone(), role: user.role.to_string() };
+    info!("Connexion: {}", user.username);
+    let mut resp = (StatusCode::OK, Json(response_body)).into_response();
+    if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
+        resp.headers_mut().insert(axum::http::header::SET_COOKIE, hv);
+    }
+    resp
 }
 
 // --- MOT DE PASSE ---
@@ -1789,8 +2231,8 @@ async fn reset_password_handler(
     State(state): State<AppState>,
     Json(req): Json<ResetPasswordRequest>,
 ) -> impl IntoResponse {
-    if req.new_password.len() < 8 {
-        return (StatusCode::BAD_REQUEST, "Mot de passe trop court (minimum 8 caractères)").into_response();
+    if let Err(msg) = validate_password(&req.new_password) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
     }
 
     let reset_col = state.db.collection::<ResetToken>("reset_tokens");
@@ -1858,8 +2300,8 @@ async fn change_password_handler(
         Err(s) => return (s, "Token invalide").into_response(),
     };
 
-    if req.new_password.len() < 8 {
-        return (StatusCode::BAD_REQUEST, "Nouveau mot de passe trop court (minimum 8 caractères)").into_response();
+    if let Err(msg) = validate_password(&req.new_password) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
     }
 
     let col = state.db.collection::<User>("users");

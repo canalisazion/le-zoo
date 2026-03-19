@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
-use gloo_storage::{LocalStorage, Storage};
 use reqwest::Client;
 use shared::ChannelWithStats;
 use crate::config::API_BASE_URL;
+use crate::fetch_creds::WithCredentials; // ✅ [H-8]
 
 #[component]
 pub fn DiscoverModal(
@@ -89,9 +89,8 @@ pub fn DiscoverModal(
                                                 let subscribe = !is_subscribed;
                                                 spawn(async move {
                                                     let client = Client::new();
-                                                    let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                                     let _ = client.post(format!("{}/api/users/channels/subscribe", API_BASE_URL))
-                                                        .header("Authorization", format!("Bearer {}", token))
+                                                        .with_credentials() // ✅ [H-8]
                                                         .json(&serde_json::json!({ "channel_id": cid, "subscribe": subscribe }))
                                                         .send().await;
                                                     subscribed_channels.with_mut(|s| {
@@ -159,9 +158,8 @@ pub fn DiscoverModal(
                                                                 let subscribe = !is_subscribed;
                                                                 spawn(async move {
                                                                     let client = Client::new();
-                                                                    let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                                                     let _ = client.post(format!("{}/api/users/channels/subscribe", API_BASE_URL))
-                                                                        .header("Authorization", format!("Bearer {}", token))
+                                                                        .with_credentials() // ✅ [H-8]
                                                                         .json(&serde_json::json!({ "channel_id": cid, "subscribe": subscribe }))
                                                                         .send().await;
                                                                     subscribed_channels.with_mut(|s| {

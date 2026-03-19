@@ -13,3 +13,4 @@ pub mod channels_sidebar;
 pub mod members_sidebar;
 pub mod messages_view;
 pub mod message_input;
+pub mod chat_bubble;

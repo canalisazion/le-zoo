@@ -3,5 +3,7 @@ dist/
 .env
 *.log
 .aider*
-Cargo.lock
 node_modules/
+*.wasm
+_env
+_env*

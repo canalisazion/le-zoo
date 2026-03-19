@@ -26,7 +26,7 @@ tracing = "0.1.44"
 feed-rs = "1.3"
 regex = "1"
 once_cell = "1"
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-native-tls", "builder"] }
+resend-rs = "0.8"
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 
@@ -37,3 +37,15 @@ path = "src/main.rs"
 [[bin]]
 name = "purge_db"
 path = "src/bin/purge_db.rs"
+
+[[bin]]
+name = "seed_articles"
+path = "src/bin/seed_articles.rs"
+
+[[bin]]
+name = "seed_real_articles"
+path = "src/bin/seed_real_articles.rs"
+
+[[bin]]
+name = "promote_user"
+path = "src/bin/promote_user.rs"

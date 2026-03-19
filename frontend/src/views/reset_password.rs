@@ -45,8 +45,13 @@ pub fn ResetPassword() -> Element {
             status.set("❌ Lien invalide — aucun token trouvé".to_string());
             return;
         }
-        if pwd.len() < 8 {
-            status.set("❌ Le mot de passe doit faire au moins 8 caractères".to_string());
+        if pwd.len() < 8
+            || !pwd.chars().any(|c| c.is_uppercase())
+            || !pwd.chars().any(|c| c.is_lowercase())
+            || !pwd.chars().any(|c| c.is_ascii_digit())
+            || !pwd.chars().any(|c| !c.is_alphanumeric())
+        {
+            status.set("❌ Le mot de passe doit contenir au moins 8 caractères, une majuscule, une minuscule, un chiffre et un caractère spécial.".to_string());
             return;
         }
         if pwd != confirm {

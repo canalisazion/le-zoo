@@ -3,6 +3,7 @@ use gloo_storage::{LocalStorage, Storage};
 use reqwest::Client;
 use shared::{Role, MemberInfo};
 use crate::config::API_BASE_URL;
+use crate::fetch_creds::WithCredentials; // ✅ [H-8]
 
 #[component]
 pub fn UserAdminModal(
@@ -72,9 +73,8 @@ pub fn UserAdminModal(
                                             let t = t1.clone();
                                             spawn(async move {
                                                 let client = Client::new();
-                                                let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                                 let _ = client.post(format!("{}/api/users/promote", API_BASE_URL))
-                                                    .header("Authorization", format!("Bearer {}", token))
+                                                    .with_credentials() // ✅ [H-8]
                                                     .json(&serde_json::json!({"username": t, "role": "admin"}))
                                                     .send().await;
                                                 popup_user.set(None);
@@ -92,9 +92,8 @@ pub fn UserAdminModal(
                                             let t = t2.clone();
                                             spawn(async move {
                                                 let client = Client::new();
-                                                let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                                 let _ = client.post(format!("{}/api/users/promote", API_BASE_URL))
-                                                    .header("Authorization", format!("Bearer {}", token))
+                                                    .with_credentials() // ✅ [H-8]
                                                     .json(&serde_json::json!({"username": t, "role": "super_admin"}))
                                                     .send().await;
                                                 popup_user.set(None);
@@ -112,9 +111,8 @@ pub fn UserAdminModal(
                                             let t = t3.clone();
                                             spawn(async move {
                                                 let client = Client::new();
-                                                let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                                 let _ = client.post(format!("{}/api/users/promote", API_BASE_URL))
-                                                    .header("Authorization", format!("Bearer {}", token))
+                                                    .with_credentials() // ✅ [H-8]
                                                     .json(&serde_json::json!({"username": t, "role": "user"}))
                                                     .send().await;
                                                 popup_user.set(None);
@@ -134,9 +132,8 @@ pub fn UserAdminModal(
                                             let t = t4.clone();
                                             spawn(async move {
                                                 let client = Client::new();
-                                                let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                                 let _ = client.post(format!("{}/api/users/ban", API_BASE_URL))
-                                                    .header("Authorization", format!("Bearer {}", token))
+                                                    .with_credentials() // ✅ [H-8]
                                                     .json(&serde_json::json!({"username": t}))
                                                     .send().await;
                                                 popup_user.set(None);

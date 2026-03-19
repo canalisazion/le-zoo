@@ -4,6 +4,7 @@ use gloo_storage::{LocalStorage, Storage};
 use reqwest::Client;
 use crate::config::API_BASE_URL;
 use crate::views::chat::ChatMessage;
+use crate::fetch_creds::WithCredentials; // ✅ [H-8]
 
 #[component]
 pub fn ChannelsSidebar(
@@ -283,10 +284,10 @@ pub fn ChannelsSidebar(
                             direct_chat_with.set(None);
                             spawn(async move {
                                 let client = Client::new();
-                                let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
+                                // ✅ [H-8] cookie HttpOnly
                                 if let Ok(res) = client
                                     .get(format!("{}/api/channels/discover", API_BASE_URL))
-                                    .header("Authorization", format!("Bearer {}", token))
+                                    .with_credentials()
                                     .send().await
                                 {
                                     if let Ok(list) = res.json::<Vec<ChannelWithStats>>().await {

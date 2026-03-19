@@ -10,20 +10,20 @@ async fn main() {
     let client = Client::with_uri_str(&mongo_uri).await.expect("Connexion MongoDB échouée");
     let db = client.database(&db_name);
 
-    // Supprime tous les users
+    // Supprime tous les users SAUF les Dictateurs
     let users = db.collection::<mongodb::bson::Document>("users");
-    let r = users.delete_many(doc! {}, None).await.unwrap();
-    println!("Users supprimés : {}", r.deleted_count);
+    let r = users.delete_many(doc! { "role": { "$ne": "dictateur" } }, None).await.unwrap();
+    println!("Users supprimés (non-dictateurs) : {}", r.deleted_count);
 
-    // Supprime tous les messages
+    // Vide les messages des canaux essentiels uniquement
+    let essential = ["general", "cinema", "mediatheque", "cantine", "sport", "infos"];
     let messages = db.collection::<mongodb::bson::Document>("messages");
-    let r = messages.delete_many(doc! {}, None).await.unwrap();
-    println!("Messages supprimés : {}", r.deleted_count);
+    let r = messages.delete_many(
+        doc! { "channel_id": { "$in": essential.to_vec() } },
+        None
+    ).await.unwrap();
+    println!("Messages des canaux essentiels supprimés : {}", r.deleted_count);
 
-    // Supprime les canaux NON gold
-    let channels = db.collection::<mongodb::bson::Document>("channels");
-    let r = channels.delete_many(doc! { "is_gold": { "$ne": true } }, None).await.unwrap();
-    println!("Canaux non-gold supprimés : {}", r.deleted_count);
-
-    println!("Purge terminée. Les canaux gold sont conservés.");
+    // Les canaux et les articles ne sont PAS touchés
+    println!("Purge terminée. Canaux et articles conservés.");
 }

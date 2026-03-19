@@ -8,6 +8,7 @@ pub enum Role {
     User,
     Admin,
     SuperAdmin,
+    Dictateur,
     Ai,
 }
 
@@ -20,26 +21,31 @@ impl Default for Role {
 impl std::fmt::Display for Role {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Role::User => write!(f, "user"),
-            Role::Admin => write!(f, "admin"),
+            Role::User      => write!(f, "user"),
+            Role::Admin     => write!(f, "admin"),
             Role::SuperAdmin => write!(f, "super_admin"),
-            Role::Ai => write!(f, "ai"),
+            Role::Dictateur => write!(f, "dictateur"),
+            Role::Ai        => write!(f, "ai"),
         }
     }
 }
 
 impl Role {
-    /// SuperAdmin gère tout le monde, Admin gère les Users uniquement
+    /// Dictateur gère tout le monde, SuperAdmin aussi, Admin gère les Users uniquement
     pub fn can_manage(&self, target: &Role) -> bool {
         match self {
-            Role::SuperAdmin => true,
+            Role::Dictateur | Role::SuperAdmin => true,
             Role::Admin => matches!(target, Role::User),
             Role::User | Role::Ai => false,
         }
     }
 
     pub fn is_at_least_admin(&self) -> bool {
-        matches!(self, Role::Admin | Role::SuperAdmin)
+        matches!(self, Role::Admin | Role::SuperAdmin | Role::Dictateur)
+    }
+
+    pub fn is_dictateur(&self) -> bool {
+        matches!(self, Role::Dictateur)
     }
 }
 
@@ -211,4 +217,68 @@ pub enum WsServerMsg {
         message_id: String,
         status: MessageStatus,
     },
+    MessageDeleted {
+        id: String,
+    },
 }
+
+// --- Système d'articles magazine ---
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArticleCategory {
+    Dossier,
+    Insolite,
+    FaitsDivers,
+    Culture,
+    Formation,
+    Critique,
+    Billet,
+}
+
+impl std::fmt::Display for ArticleCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ArticleCategory::Dossier    => "dossier",
+            ArticleCategory::Insolite   => "insolite",
+            ArticleCategory::FaitsDivers => "faits-divers",
+            ArticleCategory::Culture    => "culture",
+            ArticleCategory::Formation  => "formation",
+            ArticleCategory::Critique   => "critique",
+            ArticleCategory::Billet     => "billet",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Article {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub slug: String,
+    pub title: String,
+    pub content: String,
+    pub excerpt: String,
+    pub category: ArticleCategory,
+    pub author_name: String,
+    #[serde(default)]
+    pub cover_image: Option<String>,
+    pub published: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ArticleSummary {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub slug: String,
+    pub title: String,
+    pub excerpt: String,
+    pub category: ArticleCategory,
+    pub author_name: String,
+    #[serde(default)]
+    pub cover_image: Option<String>,
+    pub created_at: i64,
+}
+

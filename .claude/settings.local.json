@@ -12,7 +12,17 @@
       "Bash(dx build:*)",
       "Bash(\"C:/Users/ASUS/Desktop/rust-chat-forum/frontend/assets/tailwind.css\":*)",
       "Bash(python:*)",
-      "Bash(tree -L 3 \"C:\\\\Users\\\\ASUS\\\\Desktop\\\\rust-chat-forum\" -I 'target|node_modules|\\\\.git' 2>/dev/null || find \"C:\\\\Users\\\\ASUS\\\\Desktop\\\\rust-chat-forum\" -type d -not -path '*/target/*' -not -path '*/.git/*' -not -path '*/node_modules/*' | head -50)"
+      "Bash(tree -L 3 \"C:\\\\Users\\\\ASUS\\\\Desktop\\\\rust-chat-forum\" -I 'target|node_modules|\\\\.git' 2>/dev/null || find \"C:\\\\Users\\\\ASUS\\\\Desktop\\\\rust-chat-forum\" -type d -not -path '*/target/*' -not -path '*/.git/*' -not -path '*/node_modules/*' | head -50)",
+      "Bash(cd \"C:\\\\Users\\\\ASUS\\\\Desktop\\\\rust-chat-forum\" && cargo run --bin purge_db 2>&1)",
+      "Bash(powershell.exe -Command \"$files = Get-ChildItem 'C:\\\\\\\\Users\\\\\\\\ASUS\\\\\\\\Desktop\\\\\\\\rust-chat-forum\\\\\\\\frontend\\\\\\\\src' -Recurse -Filter '*.rs' | Where-Object { \\\\$_.Name -ne 'fetch_creds.rs' }; foreach \\(\\\\$f in \\\\$files\\) { \\\\$content = Get-Content \\\\$f.FullName -Raw; \\\\$new = \\\\$content -replace '\\\\.fetch_credentials_mode\\\\\\(web_sys::RequestCredentials::Include\\\\\\)', '.with_credentials\\(\\)'; \\\\$new = \\\\$new -replace 'use web_sys; // ✅ \\\\[H-8\\\\]', 'use crate::fetch_creds::WithCredentials; // ✅ [H-8]'; Set-Content \\\\$f.FullName \\\\$new -NoNewline; Write-Host \\('Updated: ' + \\\\$f.Name\\) }\" 2>&1)",
+      "Bash(where.exe python:*)",
+      "Bash(cd:*)",
+      "Bash(netstat:*)",
+      "Bash(\"C:\\\\Users\\\\ASUS\\\\Desktop\\\\rust-chat-forum\\\\shared\\\\src\\\\lib.rs\")",
+      "Bash(ls:*)",
+      "Bash(cargo run:*)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/api/login)",
+      "Bash(curl:*)"
     ]
   }
 }

@@ -3,8 +3,8 @@ use shared::{Role, MessageStatus};
 use crate::views::chat::ChatMessage;
 use crate::config::API_BASE_URL;
 use chrono::{DateTime, Utc, Datelike};
-use gloo_storage::{LocalStorage, Storage};
 use reqwest::Client;
+use crate::fetch_creds::WithCredentials; // ✅ [H-8]
 
 #[component]
 pub fn MessagesView(messages: Signal<Vec<ChatMessage>>, current_user: Signal<String>, is_admin: bool) -> Element {
@@ -22,10 +22,11 @@ pub fn MessagesView(messages: Signal<Vec<ChatMessage>>, current_user: Signal<Str
                             let is_ai = msg.role == Role::Ai;
 
                             let badge = match &msg.role {
+                                Role::Dictateur  => "⚜️ ",
                                 Role::SuperAdmin => "👑 ",
-                                Role::Admin => "🛡️ ",
-                                Role::User => "⚔️ ",
-                                Role::Ai => "✨ ",
+                                Role::Admin      => "🛡️ ",
+                                Role::User       => "⚔️ ",
+                                Role::Ai         => "✨ ",
                             };
 
                             let name_color = if is_ai {
@@ -137,9 +138,9 @@ pub fn MessagesView(messages: Signal<Vec<ChatMessage>>, current_user: Signal<Str
                                                             let id = id_del.clone();
                                                             spawn(async move {
                                                                 let client = Client::new();
-                                                                let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
+                                                                // ✅ [H-8] cookie HttpOnly
                                                                 let _ = client.delete(format!("{}/api/messages/{}", API_BASE_URL, id))
-                                                                    .header("Authorization", format!("Bearer {}", token))
+                                                                    .with_credentials()
                                                                     .send().await;
                                                             });
                                                         },
@@ -152,9 +153,8 @@ pub fn MessagesView(messages: Signal<Vec<ChatMessage>>, current_user: Signal<Str
                                                             let id = id_pin.clone();
                                                             spawn(async move {
                                                                 let client = Client::new();
-                                                                let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                                                 let _ = client.post(format!("{}/api/messages/{}/pin", API_BASE_URL, id))
-                                                                    .header("Authorization", format!("Bearer {}", token))
+                                                                    .with_credentials()
                                                                     .send().await;
                                                             });
                                                         },

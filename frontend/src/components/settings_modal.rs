@@ -3,6 +3,7 @@ use gloo_storage::{LocalStorage, Storage};
 use reqwest::Client;
 use serde::Serialize;
 use crate::config::API_BASE_URL;
+use crate::fetch_creds::WithCredentials; // ✅ [H-8]
 
 #[derive(Serialize)]
 struct ChangePasswordPayload {
@@ -48,11 +49,10 @@ pub fn SettingsModal(
         }
 
         pwd_loading.set(true);
-        let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
-
+        // ✅ [H-8] cookie HttpOnly envoyé automatiquement
         let res = Client::new()
             .post(format!("{}/api/auth/change-password", API_BASE_URL))
-            .header("Authorization", format!("Bearer {}", token))
+            .with_credentials()
             .json(&ChangePasswordPayload { old_password: old, new_password: new })
             .send()
             .await;
@@ -293,17 +293,16 @@ pub fn SettingsModal(
                                                     }
                                                     delete_loading.set(true);
                                                     spawn(async move {
-                                                        let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
+                                                        // ✅ [H-8] cookie HttpOnly — le backend efface le cookie dans sa réponse
                                                         let res = Client::new()
                                                             .delete(format!("{}/api/users/delete", API_BASE_URL))
-                                                            .header("Authorization", format!("Bearer {}", token))
+                                                            .with_credentials()
                                                             .json(&serde_json::json!({ "password": pwd }))
                                                             .send()
                                                             .await;
                                                         delete_loading.set(false);
                                                         match res {
                                                             Ok(r) if r.status().as_u16() == 200 => {
-                                                                LocalStorage::delete("jwt");
                                                                 LocalStorage::delete("username");
                                                                 LocalStorage::delete("role");
                                                                 let _ = dioxus::document::eval("window.location.href = '/'");
@@ -356,13 +355,19 @@ pub fn SettingsModal(
 
                     // Pied — déconnexion
                     div { class: "px-4 py-4 border-t", style: "border-color:var(--border);",
+                        // ✅ [H-8] Déconnexion : appel /api/logout pour effacer le cookie HttpOnly
                         button {
                             class: "w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 transition font-semibold text-sm flex items-center justify-center gap-2",
                             onclick: move |_| {
-                                LocalStorage::delete("jwt");
                                 LocalStorage::delete("username");
                                 LocalStorage::delete("role");
-                                let _ = dioxus::document::eval("window.location.href = '/login'");
+                                spawn(async move {
+                                    let _ = Client::new()
+                                        .post(format!("{}/api/logout", API_BASE_URL))
+                                        .with_credentials()
+                                        .send().await;
+                                    let _ = dioxus::document::eval("window.location.href = '/login'");
+                                });
                             },
                             span { "🚪" }
                             span { "Se déconnecter" }

@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
-use gloo_storage::{LocalStorage, Storage};
 use reqwest::Client;
 use shared::Channel;
 use crate::config::API_BASE_URL;
+use crate::fetch_creds::WithCredentials; // ✅ [H-8]
 #[allow(unused_imports)]
 use serde_json;
 
@@ -130,7 +130,6 @@ pub fn CreateChannelModal(
                                 if !name.is_empty() {
                                     spawn(async move {
                                         let client = Client::new();
-                                        let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                         let id = name.to_lowercase().replace(" ", "_");
                                         let new_channel = Channel {
                                             id: Some(id),
@@ -150,13 +149,15 @@ pub fn CreateChannelModal(
                                         };
 
                                         if let Ok(res) = client.post(format!("{}/api/channels", API_BASE_URL))
-                                            .header("Authorization", format!("Bearer {}", token))
+                                            .with_credentials() // ✅ [H-8]
                                             .json(&new_channel)
                                             .send()
                                             .await
                                         {
                                             if res.status().is_success() {
-                                                if let Ok(res) = client.get(format!("{}/api/channels", API_BASE_URL)).send().await {
+                                                if let Ok(res) = client.get(format!("{}/api/channels", API_BASE_URL))
+                                                    .with_credentials()
+                                                    .send().await {
                                                     if let Ok(list) = res.json::<Vec<Channel>>().await {
                                                         channels.set(list);
                                                     }

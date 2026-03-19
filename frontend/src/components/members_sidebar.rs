@@ -105,8 +105,9 @@ pub fn MembersSidebar(
                         let avatar_opt = member.avatar.clone();
                         let user_badges = member.badges.clone();
                         let badge = match member.role {
+                            Role::Dictateur  => "⚜️",
                             Role::SuperAdmin => "👑",
-                            Role::Admin => "🛡️",
+                            Role::Admin      => "🛡️",
                             Role::User | Role::Ai => "",
                         };
                         let name_class = if member.gender == "femme" {

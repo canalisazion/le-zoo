@@ -10,13 +10,14 @@ base64 = "0.22.1"
 chrono = { version = "0.4.43", features = ["wasm-bindgen"] }
 dioxus = { version = "0.7.1", features = ["router"] }
 futures-util = "0.3.31"
+futures-channel = "0.3"
 gloo-dialogs = "0.2.0"
 gloo-file = { version = "0.3.0", features = ["futures"] }
 gloo-net = "0.6.0"
 gloo-storage = "0.3.0"
 gloo-timers = "0.3.0"
 js-sys = "0.3.85"
-web-sys = { version = "0.3", features = ["Window", "Location", "UrlSearchParams"] }
+web-sys = { version = "0.3", features = ["Window", "Location", "UrlSearchParams", "RequestCredentials"] }
 
 # --- NOS AJOUTS POUR LE TCHAT ---
 # Pour parler au backend

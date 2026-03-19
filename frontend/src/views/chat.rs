@@ -14,11 +14,14 @@ use futures_util::{
     future::{select, Either},
     SinkExt, StreamExt,
 };
+use futures_channel::mpsc;
 use gloo_net::websocket::{futures::WebSocket, Message};
 use gloo_storage::{LocalStorage, Storage};
 use reqwest::Client;
 use shared::{Channel, ChannelWithStats, MemberInfo, Role, WsServerMsg, MessageStatus};
 use js_sys;
+use crate::fetch_creds::WithCredentials; // ✅ [H-8]
+use crate::Route;
 
 #[derive(Clone)]
 pub struct ChatMessage {
@@ -36,6 +39,66 @@ pub struct ChatMessage {
 
 #[component]
 pub fn Chat() -> Element {
+    let nav = use_navigator();
+
+    // Auth guard — page teaser si non connecté
+    let username_check: String = LocalStorage::get("username").unwrap_or_default();
+    if username_check.is_empty() || username_check == "Anonyme" {
+        return rsx! {
+            div {
+                style: "background: var(--bg-magazine); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem 1rem;",
+                div {
+                    style: "max-width: 560px; width: 100%; text-align: center;",
+
+                    // Icône
+                    div { style: "font-size: 3.5rem; margin-bottom: 1rem; line-height: 1;", "💬" }
+
+                    // Titre
+                    h1 {
+                        style: "font-family: 'Playfair Display', Georgia, serif; font-size: 2rem; font-weight: 800; color: var(--accent); margin: 0 0 0.75rem;",
+                        "Le Forum du Zoo"
+                    }
+
+                    // Accroche
+                    p {
+                        style: "font-size: 1.05rem; color: var(--text-main); line-height: 1.7; margin-bottom: 0.6rem;",
+                        "Des dizaines de salons actifs, des débats qui piquent, des révélations qui choquent."
+                    }
+                    p {
+                        style: "font-size: 1rem; color: var(--text-muted); line-height: 1.7; margin-bottom: 1.8rem;",
+                        "Rejoins la communauté, poste en temps réel, réagis à chaud — et fais partie des initiés qui voient tout avant les autres."
+                    }
+
+                    // Séparateur features
+                    div {
+                        style: "display: flex; justify-content: center; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 2rem;",
+                        span { style: "font-size: 0.82rem; color: var(--text-muted); background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px; padding: 0.3rem 0.9rem;", "🔥 Salons thématiques" }
+                        span { style: "font-size: 0.82rem; color: var(--text-muted); background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px; padding: 0.3rem 0.9rem;", "⚡ Temps réel" }
+                        span { style: "font-size: 0.82rem; color: var(--text-muted); background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px; padding: 0.3rem 0.9rem;", "🎭 Messages privés" }
+                        span { style: "font-size: 0.82rem; color: var(--text-muted); background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px; padding: 0.3rem 0.9rem;", "🆓 100 % gratuit" }
+                    }
+
+                    // CTA principal
+                    Link {
+                        to: Route::Register {},
+                        style: "display: inline-block; background: var(--accent); color: #fff; font-family: Inter, sans-serif; font-size: 1rem; font-weight: 700; padding: 0.85rem 2.2rem; border-radius: 6px; text-decoration: none; letter-spacing: 0.03em; margin-bottom: 1rem;",
+                        "Créer mon compte — c'est gratuit"
+                    }
+
+                    // Lien login
+                    p { style: "font-size: 0.85rem; color: var(--text-muted);",
+                        "Déjà membre ? "
+                        Link {
+                            to: Route::Login {},
+                            style: "color: var(--accent); text-decoration: underline; font-weight: 600;",
+                            "Se connecter"
+                        }
+                    }
+                }
+            }
+        };
+    }
+
     // --- STATE ---
     let mut messages = use_signal(|| Vec::<ChatMessage>::new());
     let draft = use_signal(|| String::new());
@@ -67,7 +130,7 @@ pub fn Chat() -> Element {
     let new_channel_topic = use_signal(|| String::new());
     let popup_user = use_signal(|| Option::<String>::None);
     let mut confirm_delete_channel = use_signal(|| Option::<String>::None);
-    let mut pending_send = use_signal(|| Option::<(String, String)>::None);
+    let mut ws_outgoing = use_signal(|| Option::<mpsc::UnboundedSender<String>>::None);
     let mut show_channels_mobile = use_signal(|| false);
     let mut show_members_mobile = use_signal(|| false);
     let mut show_discover_modal = use_signal(|| false);
@@ -102,10 +165,10 @@ pub fn Chat() -> Element {
     // Charger la liste des salons
     let _channels_loader = use_resource(move || async move {
         let client = Client::new();
-        let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
+        // ✅ [H-8] cookie HttpOnly envoyé automatiquement
         if let Ok(res) = client
             .get(format!("{}/api/channels", API_BASE_URL))
-            .header("Authorization", format!("Bearer {}", token))
+            .with_credentials()
             .send()
             .await
         {
@@ -120,10 +183,9 @@ pub fn Chat() -> Element {
         let _v = *members_version.read();
         async move {
             let client = Client::new();
-            let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
             if let Ok(res) = client
                 .get(format!("{}/api/users", API_BASE_URL))
-                .header("Authorization", format!("Bearer {}", token))
+                .with_credentials()
                 .send()
                 .await
             {
@@ -137,10 +199,9 @@ pub fn Chat() -> Element {
     // Charger les souscriptions de l'utilisateur
     let _subscriptions_loader = use_resource(move || async move {
         let client = Client::new();
-        let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
         if let Ok(res) = client
             .get(format!("{}/api/users/me", API_BASE_URL))
-            .header("Authorization", format!("Bearer {}", token))
+            .with_credentials()
             .send()
             .await
         {
@@ -184,7 +245,7 @@ pub fn Chat() -> Element {
         let direct_with = direct_chat_with.read().clone();
         async move {
             let client = Client::new();
-            let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
+            // ✅ [H-8] cookie HttpOnly envoyé automatiquement via credentials:include
 
             // Reset pagination state on channel/DM switch
             oldest_msg_id.set(None);
@@ -197,7 +258,7 @@ pub fn Chat() -> Element {
                 let url = format!("{}/api/direct_messages?with={}", API_BASE_URL, target);
                 if let Ok(res) = client
                     .get(url)
-                    .header("Authorization", format!("Bearer {}", token))
+                    .with_credentials()
                     .send()
                     .await
                 {
@@ -225,11 +286,10 @@ pub fn Chat() -> Element {
                         for msg in formatted.iter() {
                             if msg.author != current_user && msg.id.is_some() {
                                 let msg_id = msg.id.clone().unwrap();
-                                let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                 spawn(async move {
                                     let client = Client::new();
                                     let _ = client.post(format!("{}/api/direct_messages/read", API_BASE_URL))
-                                        .header("Authorization", format!("Bearer {}", token))
+                                        .with_credentials()
                                         .json(&serde_json::json!({ "message_id": msg_id }))
                                         .send().await;
                                 });
@@ -240,7 +300,7 @@ pub fn Chat() -> Element {
             } else {
                 // Charger messages du salon
                 let url = format!("{}/api/messages?channel={}", API_BASE_URL, channel);
-                if let Ok(res) = client.get(url).header("Authorization", format!("Bearer {}", token)).send().await {
+                if let Ok(res) = client.get(url).with_credentials().send().await {
                     if let Ok(msgs) = res.json::<Vec<shared::Message>>().await {
                         let formatted: Vec<ChatMessage> = msgs
                             .iter()
@@ -257,7 +317,7 @@ pub fn Chat() -> Element {
                                 pinned: m.pinned,
                             })
                             .collect();
-                        has_more_msgs.set(msgs.len() == 100);
+                        has_more_msgs.set(msgs.len() == 200); // ✅ [M-4]
                         oldest_msg_id.set(formatted.first().and_then(|m| m.id.clone()));
                         messages.set(formatted);
                     }
@@ -266,154 +326,140 @@ pub fn Chat() -> Element {
         }
     });
 
-    // Connexion WebSocket — le JWT ne passe plus dans l'URL (sécurité)
-    // Il est envoyé dans le premier message {"type":"auth","token":"...","channel":"..."}
+    // ✅ [H-1][H-8] WebSocket : JWT dans cookie HttpOnly, reconnexion auto avec backoff exponentiel
     let _ws_future = use_resource(move || {
         let channel = current_channel.read().clone();
-        let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
         let ws_url = format!("{}/ws", WS_BASE_URL);
         let _ = direct_chat_with.read(); // lu pour la réactivité
 
         async move {
-            let ws = match WebSocket::open(&ws_url) {
-                Ok(ws) => ws,
-                Err(_) => return,
-            };
-            let (mut write, mut read) = ws.split();
+            // Canal mpsc pour les messages sortants (remplace le polling 5ms)
+            let (tx, mut rx) = mpsc::unbounded::<String>();
+            ws_outgoing.set(Some(tx));
 
-            // Envoyer le message d'authentification immédiatement
-            let auth_msg = serde_json::json!({
-                "type": "auth",
-                "token": token,
-                "channel": channel,
-            })
-            .to_string();
-            if write.send(Message::Text(auth_msg)).await.is_err() {
-                return;
-            }
+            let mut delay_ms = 2000u64;
+            loop {
+                let ws = match WebSocket::open(&ws_url) {
+                    Ok(ws) => ws,
+                    Err(_) => {
+                        gloo_timers::future::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        delay_ms = (delay_ms * 2).min(30_000);
+                        continue;
+                    }
+                };
+                delay_ms = 2000;
+                let (mut write, mut read) = ws.split();
 
-            {
+                let auth_msg = serde_json::json!({ "type": "auth", "channel": channel }).to_string();
+                if write.send(Message::Text(auth_msg)).await.is_err() {
+                    gloo_timers::future::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    delay_ms = (delay_ms * 2).min(30_000);
+                    continue;
+                }
 
                 loop {
-                    match select(
-                        read.next(),
-                        gloo_timers::future::sleep(std::time::Duration::from_millis(5)),
-                    )
-                    .await
-                    {
-                        Either::Left((msg_res, _)) => {
-                            if let Some(Ok(Message::Text(msg))) = msg_res {
-                                if let Ok(server_msg) = serde_json::from_str::<WsServerMsg>(&msg) {
-                                    match server_msg {
-                                        WsServerMsg::Chat {
-                                            author,
-                                            content,
-                                            role,
-                                            gender,
-                                        } => {
-                                            if direct_chat_with.read().is_none() {
+                    match select(read.next(), rx.next()).await {
+                        Either::Left((Some(Ok(Message::Text(msg))), _)) => {
+                            if let Ok(server_msg) = serde_json::from_str::<WsServerMsg>(&msg) {
+                                match server_msg {
+                                    WsServerMsg::Chat { author, content, role, gender } => {
+                                        if direct_chat_with.read().is_none() {
+                                            messages.with_mut(|v| {
+                                                v.push(ChatMessage {
+                                                    author,
+                                                    content,
+                                                    role,
+                                                    gender,
+                                                    is_direct: false,
+                                                    pending: false,
+                                                    created_at: js_sys::Date::now() as i64 / 1000,
+                                                    status: MessageStatus::Sent,
+                                                    id: None,
+                                                    pinned: false,
+                                                })
+                                            });
+                                        }
+                                    }
+                                    WsServerMsg::DirectMessage { from, content, role, gender, id } => {
+                                        if let Some(target) = direct_chat_with.read().clone() {
+                                            if from == target {
                                                 messages.with_mut(|v| {
                                                     v.push(ChatMessage {
-                                                        author,
+                                                        author: from,
                                                         content,
                                                         role,
                                                         gender,
-                                                        is_direct: false,
+                                                        is_direct: true,
                                                         pending: false,
                                                         created_at: js_sys::Date::now() as i64 / 1000,
-                                                        status: MessageStatus::Sent,
-                                                        id: None,
+                                                        status: MessageStatus::Delivered,
+                                                        id: Some(id),
                                                         pinned: false,
                                                     })
                                                 });
                                             }
                                         }
-                                        WsServerMsg::DirectMessage {
-                                            from,
-                                            content,
-                                            role,
-                                            gender,
-                                            id,
-                                        } => {
-                                            if let Some(target) = direct_chat_with.read().clone() {
-                                                if from == target {
-                                                    messages.with_mut(|v| {
-                                                        v.push(ChatMessage {
-                                                            author: from,
-                                                            content,
-                                                            role,
-                                                            gender,
-                                                            is_direct: true,
-                                                            pending: false,
-                                                            created_at: js_sys::Date::now() as i64 / 1000,
-                                                            status: MessageStatus::Delivered,
-                                                            id: Some(id),
-                                                            pinned: false,
-                                                        })
+                                    }
+                                    WsServerMsg::Presence { online } => {
+                                        members.with_mut(|list| {
+                                            for m in list.iter_mut() {
+                                                m.online = online.contains(&m.username);
+                                            }
+                                            for name in &online {
+                                                if !list.iter().any(|m| &m.username == name) {
+                                                    list.push(MemberInfo {
+                                                        username: name.clone(),
+                                                        role: Role::User,
+                                                        online: true,
+                                                        gender: String::new(),
+                                                        avatar: None,
+                                                        badges: Vec::new(),
                                                     });
                                                 }
                                             }
-                                        }
-                                        WsServerMsg::Presence { online } => {
-                                            members.with_mut(|list| {
-                                                for m in list.iter_mut() {
-                                                    m.online = online.contains(&m.username);
-                                                }
-                                                for name in &online {
-                                                    if !list.iter().any(|m| &m.username == name) {
-                                                        list.push(MemberInfo {
-                                                            username: name.clone(),
-                                                            role: Role::User,
-                                                            online: true,
-                                                            gender: String::new(),
-                                                            avatar: None,
-                                                            badges: Vec::new(),
-                                                        });
-                                                    }
-                                                }
-                                            });
-                                        }
-                                        WsServerMsg::Ack { ok, message_id } => {
-                                            if ok {
-                                                messages.with_mut(|v| {
-                                                    if let Some(last) = v.last_mut() {
-                                                        if last.pending {
-                                                            last.pending = false;
-                                                            last.status = MessageStatus::Sent;
-                                                            last.id = message_id;
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        }
-                                        WsServerMsg::MessageStatusUpdated { message_id, status } => {
+                                        });
+                                    }
+                                    WsServerMsg::Ack { ok, message_id } => {
+                                        if ok {
                                             messages.with_mut(|v| {
-                                                for msg in v.iter_mut() {
-                                                    if msg.id.as_ref() == Some(&message_id) {
-                                                        msg.status = status.clone();
-                                                        break;
+                                                if let Some(last) = v.last_mut() {
+                                                    if last.pending {
+                                                        last.pending = false;
+                                                        last.status = MessageStatus::Sent;
+                                                        last.id = message_id;
                                                     }
                                                 }
                                             });
                                         }
                                     }
+                                    WsServerMsg::MessageStatusUpdated { message_id, status } => {
+                                        messages.with_mut(|v| {
+                                            for msg in v.iter_mut() {
+                                                if msg.id.as_ref() == Some(&message_id) {
+                                                    msg.status = status.clone();
+                                                    break;
+                                                }
+                                            }
+                                        });
+                                    }
+                                    WsServerMsg::MessageDeleted { id } => {
+                                        messages.with_mut(|v| v.retain(|m| m.id.as_deref() != Some(&id)));
+                                    }
                                 }
-                            } else {
+                            }
+                        }
+                        Either::Left((_, _)) => break, // connexion fermée
+                        Either::Right((Some(text), _)) => {
+                            if write.send(Message::Text(text)).await.is_err() {
                                 break;
                             }
                         }
-                        Either::Right(_) => {
-                            let pending = pending_send.read().clone();
-                            if let Some((msg_channel, content)) = pending {
-                                if msg_channel == channel {
-                                    if write.send(Message::Text(content)).await.is_ok() {
-                                        pending_send.set(None);
-                                    }
-                                }
-                            }
-                        }
+                        Either::Right((None, _)) => break, // canal mpsc fermé
                     }
                 }
+
+                gloo_timers::future::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                delay_ms = (delay_ms * 2).min(30_000);
             }
         }
     });
@@ -623,11 +669,10 @@ pub fn Chat() -> Element {
                                     if let (Some(dm_target), Some(before_id)) = (target, before) {
                                         spawn(async move {
                                             let client = Client::new();
-                                            let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                             let url = format!("{}/api/direct_messages?with={}&before_id={}", API_BASE_URL, dm_target, before_id);
                                             if let Ok(res) = client
                                                 .get(url)
-                                                .header("Authorization", format!("Bearer {}", token))
+                                                .with_credentials()
                                                 .send()
                                                 .await
                                             {
@@ -675,11 +720,10 @@ pub fn Chat() -> Element {
                                     if let Some(before_id) = before {
                                         spawn(async move {
                                             let client = Client::new();
-                                            let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                             let url = format!("{}/api/messages?channel={}&before_id={}", API_BASE_URL, channel, before_id);
                                             if let Ok(res) = client
                                                 .get(url)
-                                                .header("Authorization", format!("Bearer {}", token))
+                                                .with_credentials()
                                                 .send()
                                                 .await
                                             {
@@ -699,7 +743,7 @@ pub fn Chat() -> Element {
                                                             pinned: m.pinned,
                                                         })
                                                         .collect();
-                                                    has_more_msgs.set(msgs.len() == 100);
+                                                    has_more_msgs.set(msgs.len() == 200); // ✅ [M-4]
                                                     oldest_msg_id.set(older.first().and_then(|m| m.id.clone()));
                                                     messages.with_mut(|v| {
                                                         let mut combined = older;
@@ -718,7 +762,7 @@ pub fn Chat() -> Element {
 
                     MessagesView { messages, current_user: username, is_admin }
 
-                    MessageInput { draft, current_channel, direct_chat_with, username, user_role, messages, pending_send }
+                    MessageInput { draft, current_channel, direct_chat_with, username, user_role, messages, ws_outgoing }
                 }
 
                 // ========== PANNEAU DROIT DESKTOP ==========
@@ -774,9 +818,8 @@ pub fn Chat() -> Element {
                                     let ch = current_channel.read().clone();
                                     spawn(async move {
                                         let client = Client::new();
-                                        let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                         if let Ok(res) = client.post(format!("{}/api/channels/{}/summary", API_BASE_URL, ch))
-                                            .header("Authorization", format!("Bearer {}", token))
+                                            .with_credentials()
                                             .send().await
                                         {
                                             if let Ok(json) = res.json::<serde_json::Value>().await {
@@ -795,9 +838,8 @@ pub fn Chat() -> Element {
                                     let ch = current_channel.read().clone();
                                     spawn(async move {
                                         let client = Client::new();
-                                        let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                         if let Ok(res) = client.get(format!("{}/api/channels/{}/archive", API_BASE_URL, ch))
-                                            .header("Authorization", format!("Bearer {}", token))
+                                            .with_credentials()
                                             .send().await
                                         {
                                             if let Ok(json) = res.json::<serde_json::Value>().await {
@@ -861,11 +903,12 @@ pub fn Chat() -> Element {
                                                 let ch = del_id.clone();
                                                 spawn(async move {
                                                     let client = Client::new();
-                                                    let token = LocalStorage::get::<String>("jwt").unwrap_or_default();
                                                     let _ = client.delete(format!("{}/api/channels/{}", API_BASE_URL, ch))
-                                                        .header("Authorization", format!("Bearer {}", token))
+                                                        .with_credentials()
                                                         .send().await;
-                                                    if let Ok(res) = client.get(format!("{}/api/channels", API_BASE_URL)).header("Authorization", format!("Bearer {}", token)).send().await {
+                                                    if let Ok(res) = client.get(format!("{}/api/channels", API_BASE_URL))
+                                                        .with_credentials()
+                                                        .send().await {
                                                         if let Ok(list) = res.json::<Vec<Channel>>().await {
                                                             channels.set(list);
                                                         }

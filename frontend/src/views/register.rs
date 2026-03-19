@@ -35,8 +35,13 @@ pub fn Register() -> Element {
             err_email.set("❌ Email invalide".to_string());
             has_error = true;
         }
-        if pwd.len() < 8 {
-            err_password.set("❌ Minimum 8 caractères".to_string());
+        if pwd.len() < 8
+            || !pwd.chars().any(|c| c.is_uppercase())
+            || !pwd.chars().any(|c| c.is_lowercase())
+            || !pwd.chars().any(|c| c.is_ascii_digit())
+            || !pwd.chars().any(|c| !c.is_alphanumeric())
+        {
+            err_password.set("❌ Le mot de passe doit contenir au moins 8 caractères, une majuscule, une minuscule, un chiffre et un caractère spécial.".to_string());
             has_error = true;
         }
         if has_error {
